@@ -185,25 +185,30 @@ def test_build_problem_card_nodes_components(monkeypatch, tmp_path):
     snake = tmp_path / "snake_trio.jpg"
     snake.write_bytes(b"fakesnake")
     monkeypatch.setattr(shared, "snake_image_path", lambda: str(snake))
+    monkeypatch.setattr(shared, "render_problem_card_text_image", lambda _text: "pngdata")
 
     nodes = shared.build_problem_card_nodes(
-        post_msg="正文",
+        post_msg="刷新了一道新题目～\n\n正文",
         sample_messages=["样例1", "样例2"],
         notes_message="解释",
         snake_enabled=True,
         bot_qq=1,
         bot_name="Bot",
     )
-    # post + 2 samples + notes + snake image
-    assert len(nodes) == 5, nodes
+    # intro + rendered statement + 2 samples + notes + snake image
+    assert len(nodes) == 6, nodes
     assert all(
         n["type"] == "node" and n["data"]["user_id"] == 1 and n["data"]["nickname"] == "Bot"
         for n in nodes
     )
-    assert nodes[0]["data"]["content"][0]["data"]["text"] == "正文"
-    assert nodes[3]["data"]["content"][0]["data"]["text"] == "解释"
-    assert nodes[4]["data"]["content"][0]["type"] == "image"
-    assert nodes[4]["data"]["content"][0]["data"]["file"].startswith("base64://")
+    assert nodes[0]["data"]["content"][0]["data"]["text"] == "刷新了一道新题目～"
+    assert nodes[1]["data"]["content"][0] == {
+        "type": "image",
+        "data": {"file": "base64://pngdata"},
+    }
+    assert nodes[4]["data"]["content"][0]["data"]["text"] == "解释"
+    assert nodes[5]["data"]["content"][0]["type"] == "image"
+    assert nodes[5]["data"]["content"][0]["data"]["file"].startswith("base64://")
     print("✅ build_problem_card_nodes: one node per component incl. snake")
 
 
@@ -221,3 +226,39 @@ def test_build_problem_card_nodes_omits_optional_parts(monkeypatch, tmp_path):
     assert len(nodes) == 1
     assert nodes[0]["data"]["nickname"] == "1"  # empty lookup falls back to the QQ
     print("✅ build_problem_card_nodes: missing snake/notes degrade cleanly")
+
+
+def test_build_problem_card_nodes_render_failure_falls_back_to_text(monkeypatch, tmp_path):
+    monkeypatch.setattr(shared, "snake_image_path", lambda: str(tmp_path / "missing.jpg"))
+
+    def fail_render(_text):
+        raise RuntimeError("font unavailable")
+
+    monkeypatch.setattr(shared, "render_problem_card_text_image", fail_render)
+    post_msg = "刷新了一道新题目～\n\n正文"
+    nodes = shared.build_problem_card_nodes(
+        post_msg=post_msg,
+        sample_messages=[],
+        snake_enabled=False,
+        bot_qq=1,
+        bot_name="Bot",
+    )
+
+    assert len(nodes) == 1
+    assert nodes[0]["data"]["content"] == [client.build_text(post_msg)]
+
+
+def test_build_problem_card_legacy_segments_render_body(monkeypatch):
+    monkeypatch.setattr(shared, "render_problem_card_text_image", lambda _text: "pngdata")
+
+    messages = shared.build_problem_card_legacy_segments(
+        post_msg="刷新了一道新题目～\n\n正文",
+        sample_messages=["样例1"],
+        snake_enabled=False,
+    )
+
+    assert messages == [
+        client.build_plain_message("刷新了一道新题目～"),
+        [{"type": "image", "data": {"file": "base64://pngdata"}}],
+        client.build_plain_message("样例1"),
+    ]

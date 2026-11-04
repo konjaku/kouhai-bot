@@ -57,6 +57,12 @@ NapCat (QQ) ──WS──> worker.py
   only as fallback.
 - **Scheduler current-group config**: `~/.kouhai-bot/scheduler_config.json` stores job list + time overrides for `CURRENT_GROUP`. Jobs are defined in `scheduler/jobs.py`.
 - **Multimodal statements**: `problems/fetcher.py` collects CF `tex-formula` and `tex-graphics` image metadata with statement text. Formula images and diagrams are attached to new-problem summary and `/clarify` requests, which route through `llm.general_model` like every other non-judge task; those providers must therefore accept image inputs. (A legacy `llm.multimodal_model` config section is deduplicated by name and appended to the general queue with a warning.)
+- **Rendered problem-card body**: problem cards split the user-visible
+  `greeting\n\nsummary` payload into a plain greeting node followed by a white PNG
+  rendered with Pillow, then keep samples/notes as separate text nodes. The renderer
+  uses `KOUHAI_CARD_FONT` when set and otherwise searches common Noto CJK, WenQuanYi,
+  and macOS CJK font paths. Missing fonts or render failures must degrade to the
+  original single text node, preserving the legacy-forward and direct-text fallbacks.
 - **Unified CF HTML transport**: `problems/cf_fetcher.py` is the single transport for
   Codeforces problem statement and blog HTML. It tries `cloudscraper` first and falls
   back to headless Playwright Chromium after HTTP 403, timeout/connection failure,
@@ -1165,6 +1171,9 @@ must persist the card CONTENT (`pid`, `post_msg`, `sample_messages`, `notes_mess
 replayed. If merged-forward fails but direct group text succeeds, `daily_msg.json` must
 still persist the current `pid` and rebuild inputs. `/problem` must ignore stale
 `daily_msg.json` whose `pid` does not match `state.json.today`.
+When `post_msg` contains `greeting\n\nsummary`, the greeting remains a text node and the
+summary is rendered to a base64 PNG image node. Rendering happens for both custom nodes
+and legacy self-send segments; any font/render error falls back to the original text.
 Complicated but essential for good UX.
 
 ### 13. Dispatch uses create_task

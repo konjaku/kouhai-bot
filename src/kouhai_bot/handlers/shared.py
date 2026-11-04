@@ -17,7 +17,10 @@ import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFont
 
 from ..config import get_config
 from ..llm import ChatCompletionResult, append_model_tag, chat_completion, strip_leaked_thinking, strip_model_tags
@@ -600,6 +603,94 @@ def snake_image_path() -> str:
     return os.path.join(os.path.dirname(__file__), "..", "..", "..", "snake_trio.jpg")
 
 
+_PROBLEM_CARD_FONT_CANDIDATES = (
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/Library/Fonts/Arial Unicode.ttf",
+)
+
+
+def _problem_card_font(size: int) -> ImageFont.FreeTypeFont:
+    configured = os.environ.get("KOUHAI_CARD_FONT", "").strip()
+    for candidate in (configured, *_PROBLEM_CARD_FONT_CANDIDATES):
+        if candidate and os.path.isfile(candidate):
+            return ImageFont.truetype(candidate, size=size)
+    raise RuntimeError(
+        "no CJK font found; install fonts-noto-cjk or set KOUHAI_CARD_FONT"
+    )
+
+
+def _wrap_problem_card_line(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    *,
+    font: ImageFont.FreeTypeFont,
+    max_width: int,
+) -> list[str]:
+    """Wrap mixed Chinese/Latin text by rendered pixel width."""
+    if not text:
+        return [""]
+    lines: list[str] = []
+    current = ""
+    for char in text:
+        candidate = current + char
+        width = draw.textbbox((0, 0), candidate, font=font)[2]
+        if current and width > max_width:
+            lines.append(current.rstrip())
+            current = char.lstrip()
+        else:
+            current = candidate
+    lines.append(current.rstrip())
+    return lines
+
+
+def render_problem_card_text_image(text: str) -> str:
+    """Render the user-visible problem body as a white PNG, returned as base64."""
+    text = str(text or "").strip()
+    if not text:
+        raise ValueError("problem card image text is empty")
+
+    width = 900
+    padding = 42
+    font = _problem_card_font(30)
+    scratch = Image.new("RGB", (width, 1), "white")
+    scratch_draw = ImageDraw.Draw(scratch)
+    lines: list[str] = []
+    for source_line in text.splitlines():
+        lines.extend(
+            _wrap_problem_card_line(
+                scratch_draw,
+                source_line,
+                font=font,
+                max_width=width - 2 * padding,
+            )
+        )
+
+    bbox = scratch_draw.textbbox((0, 0), "国Ag", font=font)
+    line_height = bbox[3] - bbox[1] + 14
+    height = 2 * padding + max(1, len(lines)) * line_height
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    y = padding
+    for line in lines:
+        draw.text((padding, y), line, font=font, fill="#202124")
+        y += line_height
+
+    output = BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def _problem_card_intro_and_body(post_msg: str) -> tuple[str, str]:
+    """Split ``greeting\n\nstatement`` while preserving text-only cards."""
+    intro, separator, body = str(post_msg).partition("\n\n")
+    if not separator or not intro.strip() or not body.strip():
+        return str(post_msg), ""
+    return intro.strip(), body.strip()
+
+
 def build_problem_card_nodes(
     *,
     post_msg: str,
@@ -618,9 +709,30 @@ def build_problem_card_nodes(
     """
     from ..napcat.client import build_node, build_text
 
-    nodes = [
-        build_node(user_id=bot_qq, nickname=bot_name, content=[build_text(post_msg)]),
-    ]
+    intro, problem_body = _problem_card_intro_and_body(post_msg)
+    nodes = []
+    if problem_body:
+        try:
+            rendered = render_problem_card_text_image(problem_body)
+            nodes.append(
+                build_node(user_id=bot_qq, nickname=bot_name, content=[build_text(intro)])
+            )
+            nodes.append(
+                build_node(
+                    user_id=bot_qq,
+                    nickname=bot_name,
+                    content=[{"type": "image", "data": {"file": f"base64://{rendered}"}}],
+                )
+            )
+        except Exception as exc:
+            logger.warning("problem statement image render failed; using text: %s", exc)
+            nodes.append(
+                build_node(user_id=bot_qq, nickname=bot_name, content=[build_text(post_msg)])
+            )
+    else:
+        nodes.append(
+            build_node(user_id=bot_qq, nickname=bot_name, content=[build_text(post_msg)])
+        )
     for sample in sample_messages:
         nodes.append(
             build_node(
@@ -659,7 +771,18 @@ def build_problem_card_legacy_segments(
     """Build the pre-custom-node card content for self-send/id forwarding."""
     from ..napcat.client import build_plain_message
 
-    messages = [build_plain_message(post_msg)]
+    intro, problem_body = _problem_card_intro_and_body(post_msg)
+    messages: list[list[dict]] = []
+    if problem_body:
+        try:
+            rendered = render_problem_card_text_image(problem_body)
+            messages.append(build_plain_message(intro))
+            messages.append([{"type": "image", "data": {"file": f"base64://{rendered}"}}])
+        except Exception as exc:
+            logger.warning("problem statement legacy image render failed; using text: %s", exc)
+            messages.append(build_plain_message(post_msg))
+    else:
+        messages.append(build_plain_message(post_msg))
     messages.extend(build_plain_message(str(sample)) for sample in sample_messages)
     if notes_message:
         messages.append(build_plain_message(notes_message))
