@@ -278,21 +278,68 @@ def _download_image_data_url(url: str) -> str:
     return f"data:{mime};base64,{base64.b64encode(data).decode()}"
 
 
+
 async def _download_image_data_url_async(url: str) -> str:
+    """下载 Codeforces 图片并转换成 Base64 Data URL。"""
+    import asyncio
+    import base64
+    from urllib.parse import urlsplit
+
     if url.startswith("data:"):
         return url
-    import aiohttp
-    import base64
 
-    timeout = aiohttp.ClientTimeout(total=15)
-    headers = {"User-Agent": "Mozilla/5.0"}
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-        async with session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.read()
-            content_type = str(resp.headers.get("Content-Type") or "").split(";", 1)[0]
-    mime = content_type if content_type.startswith("image/") else "image/png"
-    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+    parsed = urlsplit(url)
+
+    # 防止将任意用户提供的地址传给服务器下载
+    allowed_hosts = {
+        "espresso.codeforces.com",
+        "codeforces.com",
+        "www.codeforces.com",
+    }
+    if parsed.scheme != "https" or parsed.hostname not in allowed_hosts:
+        raise ValueError(f"Unsupported image URL: {url}")
+
+    proc = await asyncio.create_subprocess_exec(
+        "curl",
+        "--noproxy", "*",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--connect-timeout", "8",
+        "--max-time", "25",
+        "--max-filesize", "10485760",
+        "--proto", "=https",
+        "--proto-redir", "=https",
+        url,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    data, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        error = stderr.decode(errors="replace")[:500]
+        raise RuntimeError(
+            f"curl failed (exit={proc.returncode}): {error}"
+        )
+
+    if len(data) > 10 * 1024 * 1024:
+        raise ValueError("Image exceeds 10 MB")
+
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = "image/png"
+    elif data.startswith(b"\xff\xd8\xff"):
+        mime = "image/jpeg"
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        mime = "image/webp"
+    elif data.startswith((b"GIF87a", b"GIF89a")):
+        mime = "image/gif"
+    else:
+        raise ValueError("Downloaded content is not a supported image")
+
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 def _image_marker(image: dict, fallback_idx: int) -> str:
