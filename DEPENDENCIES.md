@@ -21,13 +21,25 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```bash
 cd kouhai-bot
 uv sync
+
+# 题面长图与公式渲染需要 Chromium（首次部署执行一次）
+uv run playwright install --with-deps chromium
 ```
 
 主要依赖：
 - `websockets>=12.0` — NapCat WebSocket 通信
 - `aiohttp>=3.9` — NapCat HTTP API 异步请求
 - `cloudscraper>=1.2` — 绕过 Cloudflare 爬取 CF
-- `Pillow>=10.0` — 公式图片预处理
+- `playwright>=1.45` — Codeforces 抓取降级与题面长图渲染
+- `latex2mathml>=3.81.1` — 将摘要中的 LaTeX 离线转换为浏览器原生 MathML
+- `Pillow>=10.0` — 公式图片预处理与题面长图降级渲染
+
+Linux 服务器还应安装中文字体，否则 Chromium/Pillow 无法正确显示汉字：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y fonts-noto-cjk fonts-stix
+```
 
 具体版本以 `uv.lock` 锁定为准（当前已锁定到安全版本：Pillow 12.3.0、aiohttp 3.14.3，
 依赖闭包无已知漏洞）。单独升级某个依赖：`uv lock --upgrade-package <包名>`，然后 `uv sync`。

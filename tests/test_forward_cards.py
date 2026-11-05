@@ -3,6 +3,7 @@
 import asyncio
 import os
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -185,8 +186,6 @@ def test_build_problem_card_nodes_components(monkeypatch, tmp_path):
     snake = tmp_path / "snake_trio.jpg"
     snake.write_bytes(b"fakesnake")
     monkeypatch.setattr(shared, "snake_image_path", lambda: str(snake))
-    monkeypatch.setattr(shared, "render_problem_card_text_image", lambda _text: "pngdata")
-
     nodes = shared.build_problem_card_nodes(
         post_msg="刷新了一道新题目～\n\n正文",
         sample_messages=["样例1", "样例2"],
@@ -194,6 +193,7 @@ def test_build_problem_card_nodes_components(monkeypatch, tmp_path):
         snake_enabled=True,
         bot_qq=1,
         bot_name="Bot",
+        problem_body_image="pngdata",
     )
     # intro + rendered statement + 2 samples + notes + snake image
     assert len(nodes) == 6, nodes
@@ -228,13 +228,8 @@ def test_build_problem_card_nodes_omits_optional_parts(monkeypatch, tmp_path):
     print("✅ build_problem_card_nodes: missing snake/notes degrade cleanly")
 
 
-def test_build_problem_card_nodes_render_failure_falls_back_to_text(monkeypatch, tmp_path):
+def test_build_problem_card_nodes_missing_render_falls_back_to_text(monkeypatch, tmp_path):
     monkeypatch.setattr(shared, "snake_image_path", lambda: str(tmp_path / "missing.jpg"))
-
-    def fail_render(_text):
-        raise RuntimeError("font unavailable")
-
-    monkeypatch.setattr(shared, "render_problem_card_text_image", fail_render)
     post_msg = "刷新了一道新题目～\n\n正文"
     nodes = shared.build_problem_card_nodes(
         post_msg=post_msg,
@@ -249,12 +244,11 @@ def test_build_problem_card_nodes_render_failure_falls_back_to_text(monkeypatch,
 
 
 def test_build_problem_card_legacy_segments_render_body(monkeypatch):
-    monkeypatch.setattr(shared, "render_problem_card_text_image", lambda _text: "pngdata")
-
     messages = shared.build_problem_card_legacy_segments(
         post_msg="刷新了一道新题目～\n\n正文",
         sample_messages=["样例1"],
         snake_enabled=False,
+        problem_body_image="pngdata",
     )
 
     assert messages == [
@@ -262,3 +256,67 @@ def test_build_problem_card_legacy_segments_render_body(monkeypatch):
         [{"type": "image", "data": {"file": "base64://pngdata"}}],
         client.build_plain_message("样例1"),
     ]
+
+
+def test_problem_card_html_renders_math_scripts_and_limits():
+    html = shared.build_problem_card_html(
+        "求 \\(n \\bmod m\\) 与 aᵢ₊₁，并计算 \\[\\sum_{i=1}^{n} a_i\\]。"
+        "时限2s，内存256MB。"
+    )
+
+    assert '<math xmlns="http://www.w3.org/1998/Math/MathML" display="inline">' in html
+    assert '<math xmlns="http://www.w3.org/1998/Math/MathML" display="block">' in html
+    assert "<sub>i+1</sub>" in html
+    assert "<strong>时间限制</strong><span>2s</span>" in html
+    assert "<strong>空间限制</strong><span>256MB</span>" in html
+    assert "时限2s" not in html
+
+
+def test_problem_card_html_escapes_untrusted_summary_markup():
+    html = shared.build_problem_card_html('<script>alert("x")</script> 与 $x^2$')
+
+    assert '<script>alert("x")</script>' not in html
+    assert "&lt;script&gt;" in html
+    assert "<msup>" in html
+
+
+def test_legacy_problem_card_upgrade_regenerates_current_summary(monkeypatch):
+    from kouhai_bot.handlers.cmd import stubs
+    from kouhai_bot.problem_summary import SummaryPreparationStatus
+
+    prepared = SimpleNamespace(
+        text="求 \\(n\\bmod m\\)。时限2s，内存256MB。",
+        model_tag="『M』",
+        source_sha256="a" * 64,
+    )
+
+    async def fake_prepare(statement, **kwargs):
+        assert statement == {"description": "source"}
+        return SimpleNamespace(
+            status=SummaryPreparationStatus.READY,
+            prepared=prepared,
+            reason="",
+        )
+
+    saved = []
+    monkeypatch.setattr(stubs, "load_statement_json", lambda *a, **k: {"description": "source"})
+    monkeypatch.setattr(stubs, "prepare_problem_summary", fake_prepare)
+    monkeypatch.setattr(stubs, "save_problem_summary", lambda *a, **k: saved.append((a, k)))
+    monkeypatch.setattr(stubs, "snake_replace", lambda text: text)
+
+    upgraded = asyncio.run(stubs._upgrade_cached_problem_card(
+        7,
+        "123A",
+        {
+            "pid": "123A",
+            "post_msg": "来看看这道题吧！\n\n旧摘要",
+            "sample_messages": [],
+        },
+    ))
+
+    assert upgraded["card_format_version"] == shared.PROBLEM_CARD_FORMAT_VERSION
+    assert upgraded["post_msg"] == (
+        "来看看这道题吧！\n\n求 \\(n\\bmod m\\)。时限2s，内存256MB。『M』"
+    )
+    assert saved[0][0][:3] == (7, "123A", prepared.text)
+    assert saved[0][1] == {"source_sha256": "a" * 64}

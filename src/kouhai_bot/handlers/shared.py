@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html as html_lib
 import json
 import logging
 import math
@@ -442,7 +443,8 @@ async def _multimodal_content_or_text(text: str, images: list[dict]) -> str | li
 
 # ── Today's problem ─────────────────────────────────────────────────────
 
-PROBLEM_SUMMARY_FORMAT_VERSION = 2
+PROBLEM_SUMMARY_FORMAT_VERSION = 3
+PROBLEM_CARD_FORMAT_VERSION = 2
 
 
 def _today_state_file(group_id: int) -> str:
@@ -611,6 +613,42 @@ _PROBLEM_CARD_FONT_CANDIDATES = (
     "/Library/Fonts/Arial Unicode.ttf",
 )
 
+_PROBLEM_CARD_SUPERSCRIPTS = {
+    "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4",
+    "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9",
+    "⁺": "+", "⁻": "−", "⁼": "=", "⁽": "(", "⁾": ")",
+    "ᵃ": "a", "ᵇ": "b", "ᶜ": "c", "ᵈ": "d", "ᵉ": "e",
+    "ᶠ": "f", "ᵍ": "g", "ʰ": "h", "ⁱ": "i", "ʲ": "j",
+    "ᵏ": "k", "ˡ": "l", "ᵐ": "m", "ⁿ": "n", "ᵒ": "o",
+    "ᵖ": "p", "ʳ": "r", "ˢ": "s", "ᵗ": "t", "ᵘ": "u",
+    "ᵛ": "v", "ʷ": "w", "ˣ": "x", "ʸ": "y", "ᶻ": "z",
+}
+_PROBLEM_CARD_SUBSCRIPTS = {
+    "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4",
+    "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9",
+    "₊": "+", "₋": "−", "₌": "=", "₍": "(", "₎": ")",
+    "ₐ": "a", "ₑ": "e", "ₕ": "h", "ᵢ": "i", "ⱼ": "j",
+    "ₖ": "k", "ₗ": "l", "ₘ": "m", "ₙ": "n", "ₒ": "o",
+    "ₚ": "p", "ᵣ": "r", "ₛ": "s", "ₜ": "t", "ᵤ": "u",
+    "ᵥ": "v", "ₓ": "x",
+}
+_PROBLEM_CARD_SCRIPT_RE = re.compile(
+    "([" + re.escape("".join(_PROBLEM_CARD_SUPERSCRIPTS)) + "]+)"
+    "|([" + re.escape("".join(_PROBLEM_CARD_SUBSCRIPTS)) + "]+)"
+)
+_PROBLEM_CARD_TEX_RE = re.compile(
+    r"(?s)(\\\[(?P<display>.+?)\\\]|\\\((?P<inline>.+?)\\\)|"
+    r"\$\$(?P<dollar_display>.+?)\$\$|(?<!\\)\$(?P<dollar_inline>.+?)(?<!\\)\$)"
+)
+_PROBLEM_CARD_LIMITS_RE = re.compile(
+    r"(?s)^(?P<body>.*?)"
+    r"(?:[\s，,;；。]*)\u65f6(?:\u95f4)?\u9650(?:\u5236)?\s*[:：]?\s*"
+    r"(?P<time>\d+(?:\.\d+)?\s*(?:s|\u79d2))\s*[,，;；]\s*"
+    r"(?:\u5185\u5b58|\u7a7a\u95f4(?:\u9650\u5236)?)\s*[:：]?\s*"
+    r"(?P<memory>\d+(?:\.\d+)?\s*(?:[KMG]i?B|兆))\s*[.。]?\s*$",
+    re.I,
+)
+
 
 def _problem_card_font(size: int) -> ImageFont.FreeTypeFont:
     configured = os.environ.get("KOUHAI_CARD_FONT", "").strip()
@@ -646,8 +684,8 @@ def _wrap_problem_card_line(
     return lines
 
 
-def render_problem_card_text_image(text: str) -> str:
-    """Render the user-visible problem body as a white PNG, returned as base64."""
+def _render_problem_card_text_image_pillow(text: str) -> str:
+    """Last-resort renderer used when headless Chromium is unavailable."""
     text = str(text or "").strip()
     if not text:
         raise ValueError("problem card image text is empty")
@@ -683,6 +721,236 @@ def render_problem_card_text_image(text: str) -> str:
     return base64.b64encode(output.getvalue()).decode("ascii")
 
 
+def _problem_card_plain_html(text: str) -> str:
+    """Escape prose while turning Unicode super/subscripts into real HTML."""
+    pieces: list[str] = []
+    cursor = 0
+    for match in _PROBLEM_CARD_SCRIPT_RE.finditer(text):
+        pieces.append(html_lib.escape(text[cursor:match.start()]))
+        raw = match.group(0)
+        if match.group(1) is not None:
+            value = "".join(_PROBLEM_CARD_SUPERSCRIPTS.get(char, char) for char in raw)
+            pieces.append(f"<sup>{html_lib.escape(value)}</sup>")
+        else:
+            value = "".join(_PROBLEM_CARD_SUBSCRIPTS.get(char, char) for char in raw)
+            pieces.append(f"<sub>{html_lib.escape(value)}</sub>")
+        cursor = match.end()
+    pieces.append(html_lib.escape(text[cursor:]))
+    return "".join(pieces).replace("\n", "<br>")
+
+
+def _problem_card_math_html(text: str) -> str:
+    """Convert delimited LaTeX to browser-native MathML, preserving bad input."""
+    from latex2mathml import converter
+
+    pieces: list[str] = []
+    cursor = 0
+    for match in _PROBLEM_CARD_TEX_RE.finditer(text):
+        pieces.append(_problem_card_plain_html(text[cursor:match.start()]))
+        formula = next(
+            value for value in (
+                match.group("display"),
+                match.group("inline"),
+                match.group("dollar_display"),
+                match.group("dollar_inline"),
+            )
+            if value is not None
+        )
+        display = (
+            "block"
+            if match.group("display") is not None
+            or match.group("dollar_display") is not None
+            else "inline"
+        )
+        try:
+            pieces.append(converter.convert(formula.strip(), display=display))
+        except Exception as exc:
+            logger.warning("problem card LaTeX conversion failed for %r: %s", formula, exc)
+            pieces.append(
+                f'<span class="math-fallback">{html_lib.escape(formula)}</span>'
+            )
+        cursor = match.end()
+    pieces.append(_problem_card_plain_html(text[cursor:]))
+    return "".join(pieces)
+
+
+def build_problem_card_html(text: str) -> str:
+    """Build the self-contained, offline HTML captured for a problem card."""
+    text = str(text or "").strip()
+    if not text:
+        raise ValueError("problem card image text is empty")
+
+    plain_summary = strip_model_tags(text).rstrip()
+    model_tag = text[len(plain_summary):].strip() if text.startswith(plain_summary) else ""
+    if plain_summary:
+        text = plain_summary
+
+    limits = _PROBLEM_CARD_LIMITS_RE.match(text)
+    time_limit = ""
+    memory_limit = ""
+    if limits and limits.group("body").strip():
+        text = limits.group("body").strip().rstrip("，,;；。")
+        time_limit = limits.group("time").replace(" ", "")
+        memory_limit = limits.group("memory").replace(" ", "")
+
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    body_html = "".join(
+        f'<p>{_problem_card_math_html(paragraph)}</p>' for paragraph in paragraphs
+    )
+    limits_html = ""
+    if time_limit and memory_limit:
+        limits_html = (
+            '<div class="limits">'
+            f'<div><strong>时间限制</strong><span>{html_lib.escape(time_limit)}</span></div>'
+            f'<div><strong>空间限制</strong><span>{html_lib.escape(memory_limit)}</span></div>'
+            "</div>"
+        )
+    model_tag_html = (
+        f'<footer>{html_lib.escape(model_tag)}</footer>' if model_tag else ""
+    )
+
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  * {{ box-sizing: border-box; }}
+  html, body {{ margin: 0; padding: 0; background: transparent; }}
+  #problem-card {{
+    width: 900px;
+    padding: 54px 62px 60px;
+    color: #202124;
+    background: #fff;
+    font-family: "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC",
+                 "Microsoft YaHei", "WenQuanYi Zen Hei", sans-serif;
+    font-size: 29px;
+    font-weight: 400;
+    line-height: 1.72;
+    letter-spacing: .01em;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }}
+  .rule {{
+    width: 108px;
+    height: 7px;
+    margin-bottom: 25px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #4169e1, #73a7ff);
+  }}
+  h1 {{
+    margin: 0 0 25px;
+    color: #17191c;
+    font-size: 38px;
+    font-weight: 760;
+    line-height: 1.25;
+    letter-spacing: .03em;
+  }}
+  .limits {{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin: 0 0 34px;
+    padding: 20px 24px;
+    border: 1px solid #e5e9f2;
+    border-radius: 14px;
+    background: #f7f9fc;
+    font-size: 24px;
+    line-height: 1.35;
+  }}
+  .limits div {{ display: flex; align-items: baseline; gap: 14px; }}
+  .limits strong {{ color: #3f4652; font-weight: 700; }}
+  .limits span {{ color: #5b6472; font-variant-numeric: tabular-nums; }}
+  .content p {{ margin: 0 0 24px; text-align: justify; text-justify: inter-ideograph; }}
+  .content p:last-child {{ margin-bottom: 0; }}
+  sup, sub {{
+    position: relative;
+    font-family: "Times New Roman", "STIX Two Text", serif;
+    font-size: .68em;
+    line-height: 0;
+  }}
+  sup {{ top: -.45em; }}
+  sub {{ bottom: -.16em; }}
+  math {{
+    font-family: "STIX Two Math", "STIXGeneral", "Latin Modern Math",
+                 "Cambria Math", "Times New Roman", serif;
+    font-size: 1.06em;
+  }}
+  math[display="block"] {{ margin: 25px auto; font-size: 1.12em; }}
+  .math-fallback {{
+    padding: .05em .22em;
+    border-radius: .22em;
+    background: #f4f6fa;
+    font-family: "Times New Roman", serif;
+    font-style: italic;
+  }}
+  footer {{
+    margin-top: 30px;
+    color: #9aa1ad;
+    font-size: 19px;
+    line-height: 1.2;
+    text-align: right;
+  }}
+</style>
+</head>
+<body>
+  <article id="problem-card">
+    <div class="rule"></div>
+    <h1>题目描述</h1>
+    {limits_html}
+    <section class="content">{body_html}</section>
+    {model_tag_html}
+  </article>
+</body>
+</html>"""
+
+
+def _render_problem_card_text_image_browser(text: str) -> str:
+    """Render rich Chinese typography and native MathML in headless Chromium."""
+    from playwright.sync_api import sync_playwright
+
+    document = build_problem_card_html(text)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--font-render-hinting=none"],
+        )
+        try:
+            page = browser.new_page(
+                viewport={"width": 940, "height": 1200},
+                device_scale_factor=1,
+            )
+            page.set_content(document, wait_until="load")
+            page.evaluate("() => document.fonts.ready")
+            png = page.locator("#problem-card").screenshot(
+                type="png",
+                animations="disabled",
+            )
+        finally:
+            browser.close()
+    return base64.b64encode(png).decode("ascii")
+
+
+def render_problem_card_text_image(text: str) -> str:
+    """Render a polished problem-body PNG, with a safe Pillow fallback."""
+    try:
+        return _render_problem_card_text_image_browser(text)
+    except Exception as exc:
+        logger.warning("rich problem-card renderer unavailable; using Pillow: %s", exc)
+        return _render_problem_card_text_image_pillow(text)
+
+
+async def render_problem_card_body_image(post_msg: str) -> str:
+    """Render a card body off the event loop; return empty text on failure."""
+    _intro, problem_body = _problem_card_intro_and_body(post_msg)
+    if not problem_body:
+        return ""
+    try:
+        return await asyncio.to_thread(render_problem_card_text_image, problem_body)
+    except Exception as exc:
+        logger.warning("problem statement image render failed; using text: %s", exc)
+        return ""
+
+
 def _problem_card_intro_and_body(post_msg: str) -> tuple[str, str]:
     """Split ``greeting\n\nstatement`` while preserving text-only cards."""
     intro, separator, body = str(post_msg).partition("\n\n")
@@ -699,6 +967,7 @@ def build_problem_card_nodes(
     snake_enabled: bool = True,
     bot_qq: int,
     bot_name: str = "",
+    problem_body_image: str = "",
 ) -> list[dict]:
     """Assemble a problem card as sender-attributed merged-forward nodes.
 
@@ -711,24 +980,22 @@ def build_problem_card_nodes(
 
     intro, problem_body = _problem_card_intro_and_body(post_msg)
     nodes = []
-    if problem_body:
-        try:
-            rendered = render_problem_card_text_image(problem_body)
-            nodes.append(
-                build_node(user_id=bot_qq, nickname=bot_name, content=[build_text(intro)])
+    if problem_body and problem_body_image:
+        nodes.append(
+            build_node(user_id=bot_qq, nickname=bot_name, content=[build_text(intro)])
+        )
+        nodes.append(
+            build_node(
+                user_id=bot_qq,
+                nickname=bot_name,
+                content=[
+                    {
+                        "type": "image",
+                        "data": {"file": f"base64://{problem_body_image}"},
+                    }
+                ],
             )
-            nodes.append(
-                build_node(
-                    user_id=bot_qq,
-                    nickname=bot_name,
-                    content=[{"type": "image", "data": {"file": f"base64://{rendered}"}}],
-                )
-            )
-        except Exception as exc:
-            logger.warning("problem statement image render failed; using text: %s", exc)
-            nodes.append(
-                build_node(user_id=bot_qq, nickname=bot_name, content=[build_text(post_msg)])
-            )
+        )
     else:
         nodes.append(
             build_node(user_id=bot_qq, nickname=bot_name, content=[build_text(post_msg)])
@@ -767,20 +1034,18 @@ def build_problem_card_nodes(
 
 def build_problem_card_legacy_segments(
     *, post_msg: str, sample_messages: list[str], notes_message: str = "", snake_enabled: bool = True,
+    problem_body_image: str = "",
 ) -> list[list[dict]]:
     """Build the pre-custom-node card content for self-send/id forwarding."""
     from ..napcat.client import build_plain_message
 
     intro, problem_body = _problem_card_intro_and_body(post_msg)
     messages: list[list[dict]] = []
-    if problem_body:
-        try:
-            rendered = render_problem_card_text_image(problem_body)
-            messages.append(build_plain_message(intro))
-            messages.append([{"type": "image", "data": {"file": f"base64://{rendered}"}}])
-        except Exception as exc:
-            logger.warning("problem statement legacy image render failed; using text: %s", exc)
-            messages.append(build_plain_message(post_msg))
+    if problem_body and problem_body_image:
+        messages.append(build_plain_message(intro))
+        messages.append(
+            [{"type": "image", "data": {"file": f"base64://{problem_body_image}"}}]
+        )
     else:
         messages.append(build_plain_message(post_msg))
     messages.extend(build_plain_message(str(sample)) for sample in sample_messages)
@@ -1836,23 +2101,30 @@ _SUMMARY_LEAK_RE = re.compile(
 )
 _SUMMARY_FORMAT_RE = re.compile(r"(^|\n)\s*(输入|输出|样例)\s*[:：]", re.I)
 _SUMMARY_MARKDOWN_RE = re.compile(r"(^|\n)\s*(#{1,6}\s+|[-*]\s+|```|\d+\.\s+)")
+_SUMMARY_RENDERED_MATH_GUIDE = (
+    "数学排版规则：数学变量、上下标、幂、关系、取模和公式统一写成 LaTeX。"
+    "行内公式必须放在 \\( 与 \\) 之间，较长的独立公式放在 \\[ 与 \\] 之间；"
+    "不要使用 Markdown 代码块，不要再用 Unicode 角标代替公式。"
+    "输出是 JSON 字符串，所以 LaTeX 反斜杠必须正确进行 JSON 转义。"
+    "例如：\\(a_i\\)、\\(a_{i+1}\\)、\\(10^{18}\\)、"
+    "\\(10^9+7\\)、\\(x \\bmod y\\)、\\(1 \\le n \\le 2\\times10^5\\)。"
+    "端点无法从 source 直接确认时改用自然语言，不要猜测下标终点。"
+)
 _SUMMARY_UNICODE_NOTATION_GUIDE = (
     "Unicode 角标白名单：只使用下面明确列出的字符，不要自己创造看起来像角标的字母。"
     "下标数字：₀₁₂₃₄₅₆₇₈₉；"
     "下标拉丁字母：ₐ ₑ ₕ ᵢ ⱼ ₖ ₗ ₘ ₙ ₒ ₚ ᵣ ₛ ₜ ᵤ ᵥ ₓ；"
-    "下标希腊字母：ᵦ ᵧ ᵨ ᵩ ᵪ；"
-    "下标其他字母：ₔ；"
-    "下标符号：₊ ₋ ₌ ₍ ₎；"
+    "下标希腊字母：ᵦ ᵧ ᵨ ᵩ ᵪ；下标其他字母：ₔ；下标符号：₊ ₋ ₌ ₍ ₎；"
     "上标数字：⁰¹²³⁴⁵⁶⁷⁸⁹；"
     "上标小写拉丁字母：ᵃ ᵇ ᶜ ᵈ ᵉ ᶠ ᵍ ʰ ⁱ ʲ ᵏ ˡ ᵐ ⁿ ᵒ ᵖ ʳ ˢ ᵗ ᵘ ᵛ ʷ ˣ ʸ ᶻ；"
     "上标大写拉丁字母：ᴬ ᴮ ᴰ ᴱ ᴳ ᴴ ᴵ ᴶ ᴷ ᴸ ᴹ ᴺ ᴼ ᴾ ᴿ ᵀ ᵁ ⱽ ᵂ；"
-    "上标希腊字母：ᵅ ᵝ ᵞ ᵟ ᵋ ᶿ ᵠ ᵡ；"
-    "上标其他字母：ᵊ ᵌ ᵸ ᵎ ᵔ ᵕ ᵙ ᵜ ᵚ ᶛ；"
+    "上标希腊字母：ᵅ ᵝ ᵞ ᵟ ᵋ ᶿ ᵠ ᵡ；上标其他字母：ᵊ ᵌ ᵸ ᵎ ᵔ ᵕ ᵙ ᵜ ᵚ ᶛ；"
     "上标符号：⁺ ⁻ ⁼ ⁽ ⁾。"
     "常见写法：aᵢ、aⱼ、aₖ、aₙ、aᵢ₊₁、dpᵢⱼ、x²、2ᵏ、10¹⁸、10⁹+7。"
-    "没有列出的下标/上标字母（例如下标 b/c/d/f/g/q/w/y/z，或上标 q）不要硬造；"
-    "端点下标不确定或字符白名单不够用时，优先改成自然语言，如“给定的若干元素/所有给定位置”。"
+    "没有列出的下标/上标字母不要硬造；字符白名单不够用时，优先改成自然语言。"
 )
+
+
 def _polish_summary_notation(summary: str) -> str:
     return summary.strip()
 
@@ -1882,23 +2154,25 @@ def _build_summary_prompt(stmt_text: str, input_text: str, limits_text: str) -> 
         "2. 读者只看 summary 应该知道：给了什么、允许做什么、要求算/判定/构造什么、输出含义、全部数据范围、时限和内存限制。\n"
         "3. 不要单列“输入：”“输出：”“样例：”。群友是交流做法，不是写代码；普通读入/输出格式默认省略。"
         "只保留会影响理解的输出对象/答案含义，以及多测、所有 n 之和这类限制。交互题、构造输出、多答案、YES/NO 判定、特殊输出格式会影响题意时才自然说明。\n"
-        "4. 所有数据范围必须完整出现；可合并压缩但不能丢。题面给了上下界时尽量写完整区间，如 1≤n≤2×10⁵、0≤aᵢ≤10⁹、1≤t≤10⁴、多测且所有 n 之和≤2×10⁵；范围里也使用角标，不要写 a_i。\n"
+        "4. 所有数据范围必须完整出现；可合并压缩但不能丢。题面给了上下界时尽量写完整区间，"
+        "如 \\(1\\le n\\le2\\times10^5\\)、\\(0\\le a_i\\le10^9\\)、"
+        "\\(1\\le t\\le10^4\\)、多测且所有 \\(n\\) 之和不超过 \\(2\\times10^5\\)。\n"
         "5. 时限和内存必须写在末尾，例如“时限2s，内存256MB”。\n"
         "6. 背景故事、角色名、修辞、样例细节能删就删；定义、边界、判定规则、输出目标、数据范围、时空限制不能删。不要改变规则适用对象：若原文说每次操作/每个玩家/任意元素满足某条件，不能误写成只对先手、只对某一次或只对某一类对象成立。\n"
         "题面为定义补充的特殊约定也必须保留；例如原文明确说无边顶点也算 only incoming edges，summary 必须写清“孤立点也算”。\n"
-        "7. LaTeX 是最后手段：普通数组下标和幂次优先用 Unicode 角标，如 aᵢ、a₁、a₂、aₙ、10¹⁸、10⁹+7；也可写“第 i 个/每个位置的 a”。"
-        f"{_SUMMARY_UNICODE_NOTATION_GUIDE}"
-        "必须保留加法与下标的作用域：p_i+1 表示 p_i 的值加 1，必须写成 pᵢ+1 或“标号为 pᵢ+1 的顶点”；"
-        "只有原文 p_{i+1} 才能写成 pᵢ₊₁，绝不能把 p_i+1 改成 pᵢ₊₁。"
-        "严格递增序列写 a₁<a₂<…<aₙ 或“严格递增坐标”。不要猜测列表端点或把原文没有的下标终点写进 summary；端点不适合用 Unicode 角标时改用自然语言。"
-        "简单关系用 ≤、≥、×、mod。只有复杂求和、递推、分式、多重下标、精确定义用中文会失真时，才保留最少必要 LaTeX。\n"
+        "7. 数学表达式必须保留可渲染结构，不要扁平化成容易歧义的普通文本。"
+        f"{_SUMMARY_RENDERED_MATH_GUIDE}"
+        "必须保留加法与下标的作用域：p_i+1 表示 p_i 的值加 1，必须写成 \\(p_i+1\\) 或“p_i 的值加 1”；"
+        "只有原文 p_{i+1} 才能写成 \\(p_{i+1}\\)，绝不能把 p_i+1 改成下一个下标。"
+        "严格递增序列写 \\(a_1<a_2<\\cdots<a_n\\) 或“严格递增坐标”。"
+        "不要猜测列表端点或把原文没有的下标终点写进 summary。\n"
         f"8. 目标长度不超过 {_SUMMARY_TARGET_CHARS} 个中文字符；复杂题可略长，但完整限制优先于短。\n"
         "9. 不要 Markdown、标题、列表、代码块、粗体斜体。\n\n"
         "好风格示例：\n"
         "给定长度为 n 的数组 a 和 q 个询问。每次询问给出区间 [l,r]，要求把区间划分成尽量少的连续段，"
-        "使每段内所有数的乘积等于它们的 LCM；输出最少段数。1≤n,q≤10⁵，1≤aᵢ≤10⁵，时限1s，内存256MB。\n"
-        "给定多组数据，每组有数组 a。对每个循环移位求某个二元答案 (cnt,cost)，其中 cost 对 10⁹+7 取模；1≤t≤2×10⁴，所有 n 之和≤10⁶，1≤aᵢ≤10⁹，时限3s，内存256MB。\n"
-        "给定递增坐标 1≤a₁<a₂<…<aₙ，可在整数点新增传送器，要求从 0 到 aₙ 的总代价≤m，求最少新增数。1≤n≤2×10⁵，aₙ≤m≤10¹⁸，时限7s，内存512MB。\n\n"
+        "使每段内所有数的乘积等于它们的 LCM；输出最少段数。\\(1\\le n,q\\le10^5\\)，\\(1\\le a_i\\le10^5\\)，时限1s，内存256MB。\n"
+        "给定多组数据，每组有数组 \\(a\\)。对每个循环移位求二元答案 \\((cnt,cost)\\)，其中 \\(cost\\) 对 \\(10^9+7\\) 取模；\\(1\\le t\\le2\\times10^4\\)，所有 \\(n\\) 之和不超过 \\(10^6\\)，时限3s，内存256MB。\n"
+        "给定递增坐标 \\(1\\le a_1<a_2<\\cdots<a_n\\)，可新增传送器，要求总代价不超过 \\(m\\)，求最少新增数。\\(1\\le n\\le2\\times10^5\\)，\\(a_n\\le m\\le10^{18}\\)，时限7s，内存512MB。\n\n"
         "坏风格示例（禁止）：\n"
         "输入：第一行 n 和 q... 输出：每个询问输出答案... 解题思路是预处理每个位置能延伸到哪里，然后倍增。\n\n"
         "题面素材 JSON：\n"
@@ -2088,13 +2362,12 @@ def _build_summary_repair_prompt(
         "必须保留题目目标、关键定义、输出含义、全部数据范围（上下界都保留）、时限和内存；删除题解/思路/复杂度/样例推导；"
         "修正任何把“每次/任意/双方/所有对象”的规则误写成只对先手、只对一次或只对部分对象成立的表述；"
         "保留 source 对定义的特殊约定；若 source 说无边顶点也算 only incoming edges，必须明确写“孤立点也算”；"
-        "不要单列输入输出；普通输入格式删掉，只保留答案含义、多测和总和限制；正文和数据范围里的普通 a_i、a_{i+1}、a_1<...<a_n 都改成 aᵢ、aᵢ₊₁、a₁<…<aₙ、相邻位置等角标或自然写法；"
-        f"{_SUMMARY_UNICODE_NOTATION_GUIDE}"
-        "严格区分 p_i+1 与 p_{i+1}：前者必须写 pᵢ+1 或自然语言中的“pᵢ 的值加 1”，"
-        "后者才写 pᵢ₊₁；不要把下标外的加法移进下标。"
-        "把端点无法从 source 直接确认的角标范围改成自然语言，除非 source 明确给出该终点；"
-        "把 10^18、1e18、10^9+7、1e9+7 等普通幂次改成 10¹⁸、10⁹+7；"
-        "LaTeX 只在复杂公式不可自然中文化时保留。\n\n"
+        "不要单列输入输出；普通输入格式删掉，只保留答案含义、多测和总和限制；"
+        f"{_SUMMARY_RENDERED_MATH_GUIDE}"
+        "严格区分 p_i+1 与 p_{i+1}：前者必须写 \\(p_i+1\\) 或自然语言中的“p_i 的值加 1”，"
+        "后者才写 \\(p_{i+1}\\)；不要把下标外的加法移进下标。"
+        "把端点无法从 source 直接确认的下标范围改成自然语言，除非 source 明确给出该终点；"
+        "把 10^18、1e18、10^9+7、1e9+7 等普通写法放进 LaTeX 定界符并写成幂次。\n\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
     )
 

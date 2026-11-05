@@ -1,8 +1,11 @@
 """/problem, /tag, /reveal, /scoreboard — real implementations."""
 
+import logging
+
 from .. import registry
 from ..registry import CommandDef
 from ..shared import (
+    PROBLEM_CARD_FORMAT_VERSION,
     build_scoreboard_entries,
     fetch_group_member_nickname_map,
     format_points,
@@ -10,8 +13,12 @@ from ..shared import (
     high_difficulty_notice,
     is_already_solved,
     load_scoreboard,
+    save_problem_summary,
     sanitize_cached_problem_card_payload,
+    snake_replace,
+    summarize_problem,
 )
+from ...llm import append_model_tag
 from ...napcat.client import (
     build_plain_message,
     send_group_msg,
@@ -21,6 +28,11 @@ from ...private_judge import (
     get_private_current_problem,
     send_problem_card_private,
 )
+from ...problem_content import load_statement_json
+from ...problem_summary import SummaryPreparationStatus, prepare_problem_summary
+
+
+logger = logging.getLogger("kouhai-bot.cmd.stubs")
 
 
 def _nick(sender: dict) -> str:
@@ -50,6 +62,65 @@ async def _send_high_difficulty_notice_group(group_id: int, problem: dict | None
         await send_group_msg(group_id, build_plain_message(notice))
     except Exception:
         return
+
+
+async def _upgrade_cached_problem_card(
+    group_id: int,
+    pid: str,
+    daily_msg: dict,
+) -> dict:
+    """Regenerate one legacy cached summary with renderable LaTeX, once."""
+    if daily_msg.get("card_format_version") == PROBLEM_CARD_FORMAT_VERSION:
+        return daily_msg
+    post_msg = daily_msg.get("post_msg")
+    if not isinstance(post_msg, str):
+        return daily_msg
+    intro, separator, body = post_msg.partition("\n\n")
+    if not separator or not intro.strip() or not body.strip():
+        return daily_msg
+
+    try:
+        statement = load_statement_json(pid, include_legacy_fallback=True)
+        result = await prepare_problem_summary(
+            statement,
+            generate=summarize_problem,
+            attempts=1,
+        )
+        if (
+            result.status is not SummaryPreparationStatus.READY
+            or result.prepared is None
+        ):
+            logger.warning(
+                "[group_%s] legacy problem-card summary upgrade unavailable for %s: %s",
+                group_id,
+                pid,
+                result.reason,
+            )
+            return daily_msg
+
+        prepared = result.prepared
+        rendered_summary = append_model_tag(prepared.text, prepared.model_tag)
+        upgraded = dict(daily_msg)
+        upgraded["post_msg"] = snake_replace(
+            f"{intro.strip()}\n\n{rendered_summary}"
+        )
+        upgraded["card_format_version"] = PROBLEM_CARD_FORMAT_VERSION
+        save_problem_summary(
+            group_id,
+            pid,
+            prepared.text,
+            source_sha256=prepared.source_sha256,
+        )
+        logger.info("[group_%s] upgraded cached problem card for %s", group_id, pid)
+        return upgraded
+    except Exception as exc:
+        logger.warning(
+            "[group_%s] failed to upgrade cached problem card for %s: %s",
+            group_id,
+            pid,
+            exc,
+        )
+        return daily_msg
 
 
 # ── /problem ────────────────────────────────────────────────────────────
@@ -117,6 +188,7 @@ async def resend_current_problem_group(group_id: int, sender: dict) -> None:
             if pid != current_pid:
                 raise ValueError(f"stale daily_msg pid={pid}, current={current_pid}")
             daily_msg = sanitize_cached_problem_card_payload(daily_msg)[0]
+            daily_msg = await _upgrade_cached_problem_card(group_id, pid, daily_msg)
             post_msg = daily_msg.get("post_msg")
             sample_messages = daily_msg.get("sample_messages")
             notes_message = daily_msg.get("notes_message")

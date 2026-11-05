@@ -26,6 +26,7 @@ from .handlers.shared import (
     high_difficulty_notice,
     load_bad_reports_at,
     load_scoreboard,
+    render_problem_card_body_image,
     save_problem_summary,
     save_problem_card_ref,
     sanitize_cached_problem_card_payload,
@@ -647,6 +648,7 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
         notes_message = ""
 
     bot_name = await resolve_bot_display_name(None)
+    problem_body_image = await render_problem_card_body_image(post_msg)
     nodes = build_problem_card_nodes(
         post_msg=post_msg,
         sample_messages=[str(item) for item in sample_messages],
@@ -654,12 +656,14 @@ async def send_problem_card_private(user_id: int, group_id: int, problem: dict, 
         snake_enabled=bool(payload.get("snake_enabled")),
         bot_qq=cfg.bot_qq,
         bot_name=bot_name,
+        problem_body_image=problem_body_image,
     )
     fwd_resp = await send_forward_card_with_legacy_fallback(
         destination="private", user_id=user_id, nodes=nodes,
         self_send_messages=build_problem_card_legacy_segments(
             post_msg=post_msg, sample_messages=[str(item) for item in sample_messages],
             notes_message=notes_message, snake_enabled=bool(payload.get("snake_enabled")),
+            problem_body_image=problem_body_image,
         ),
     )
     if fwd_resp:

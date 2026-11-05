@@ -59,10 +59,18 @@ NapCat (QQ) ──WS──> worker.py
 - **Multimodal statements**: `problems/fetcher.py` collects CF `tex-formula` and `tex-graphics` image metadata with statement text. Formula images and diagrams are attached to new-problem summary and `/clarify` requests, which route through `llm.general_model` like every other non-judge task; those providers must therefore accept image inputs. (A legacy `llm.multimodal_model` config section is deduplicated by name and appended to the general queue with a warning.)
 - **Rendered problem-card body**: problem cards split the user-visible
   `greeting\n\nsummary` payload into a plain greeting node followed by a white PNG
-  rendered with Pillow, then keep samples/notes as separate text nodes. The renderer
-  uses `KOUHAI_CARD_FONT` when set and otherwise searches common Noto CJK, WenQuanYi,
-  and macOS CJK font paths. Missing fonts or render failures must degrade to the
-  original single text node, preserving the legacy-forward and direct-text fallbacks.
+  rendered from self-contained HTML in headless Playwright Chromium, then keep
+  samples/notes as separate text nodes. Delimited LaTeX is converted offline to
+  native MathML with `latex2mathml`; legacy Unicode super/subscripts become real
+  HTML scripts, and trailing time/memory limits are promoted into a compact metadata
+  panel. Rendering runs in a worker thread and the resulting base64 PNG is reused by
+  both custom-node and legacy self-send paths. If Chromium is unavailable, the
+  renderer falls back to Pillow (`KOUHAI_CARD_FONT`, then common Noto CJK,
+  WenQuanYi, and macOS paths); total render failure degrades to the original text
+  node. `daily_msg.json.card_format_version` marks summaries generated with the
+  renderable-math prompt; the first `/problem` after an upgrade regenerates one
+  legacy current summary from the cached statement and persists it without changing
+  the selected problem. Keep every fallback intact.
 - **Unified CF HTML transport**: `problems/cf_fetcher.py` is the single transport for
   Codeforces problem statement and blog HTML. It tries `cloudscraper` first and falls
   back to headless Playwright Chromium after HTTP 403, timeout/connection failure,
@@ -1200,8 +1208,10 @@ in review — validation messages, error messages, reminder text, greeting text.
 All must match exactly. See the commit history for the iterative alignment process.
 
 ### 18. LaTeX in problem summaries
-`summarize_problem()` prompt explicitly forbids LaTeX/markdown. The summary model
-sometimes still outputs LaTeX — ping the user if you see this happening.
+`summarize_problem()` requires formulas to use `\(...\)` or `\[...\]` so the
+problem-card renderer can preserve mathematical structure. Markdown remains
+forbidden. Keep subscript scope exact (`p_i+1` is not `p_{i+1}`), and remember that
+the summary is JSON, so model-produced backslashes must be valid JSON escapes.
 
 ### 19. Annotation detail pages must not block on translation
 The annotation UI can show a placeholder for `summary_zh`, then fetch translation

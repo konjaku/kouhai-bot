@@ -1001,26 +1001,23 @@ def test_judge_submission_repairs_malformed_json_response():
     assert parsed["reason"] == "格式已修复"
 
 
-def test_summary_prompt_lists_unicode_notation_inventory():
+def test_summary_prompt_requires_renderable_latex_notation():
     prompt = _build_summary_prompt("stmt", "input", "limits")
     repair = _build_summary_repair_prompt("stmt", "input", "limits", "bad", ["issue"])
 
     for text in (prompt, repair):
-        assert "Unicode 角标白名单" in text
-        assert "下标数字：₀₁₂₃₄₅₆₇₈₉" in text
-        assert "上标数字：⁰¹²³⁴⁵⁶⁷⁸⁹" in text
-        assert "下标拉丁字母：ₐ ₑ ₕ ᵢ ⱼ ₖ" in text
-        assert "上标小写拉丁字母：ᵃ ᵇ ᶜ" in text
-        assert "上标大写拉丁字母：ᴬ ᴮ ᴰ" in text
-        assert "aᵢ₊₁" in text
-        assert "10¹⁸" in text
-        assert "10⁹+7" in text
-        assert "不要自己创造看起来像角标的字母" in text
-        assert "字符白名单不够用时，优先改成自然语言" in text
+        assert "数学排版规则" in text
+        assert "行内公式必须放在 \\( 与 \\) 之间" in text
+        assert "较长的独立公式放在 \\[ 与 \\] 之间" in text
+        assert "不要再用 Unicode 角标代替公式" in text
+        assert "\\(a_i\\)" in text
+        assert "\\(a_{i+1}\\)" in text
+        assert "\\(10^{18}\\)" in text
+        assert "\\(10^9+7\\)" in text
         assert "p_i+1" in text
-        assert "pᵢ+1" in text
+        assert "\\(p_i+1\\)" in text
         assert "p_{i+1}" in text
-        assert "pᵢ₊₁" in text
+        assert "\\(p_{i+1}\\)" in text
         assert "孤立点也算" in text
 
 

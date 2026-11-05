@@ -13,12 +13,14 @@ from datetime import datetime, timedelta, timezone
 from .. import registry
 from ..registry import CommandDef
 from ..shared import (
+    PROBLEM_CARD_FORMAT_VERSION,
     build_problem_card_nodes,
     build_problem_card_legacy_segments,
     get_today_problem,
     high_difficulty_notice,
     is_already_solved,
     load_scoreboard,
+    render_problem_card_body_image,
     save_problem_card_ref,
     save_problem_summary,
     save_scoreboard,
@@ -238,6 +240,7 @@ def _save_daily_msg(
     snake_enabled: bool,
 ) -> None:
     daily_msg = {
+        "card_format_version": PROBLEM_CARD_FORMAT_VERSION,
         "pid": pid,
         "post_msg": post_msg,
         "sample_messages": sample_messages,
@@ -264,6 +267,7 @@ async def _send_problem_forward_card(
     """
     cfg = get_config()
     bot_name = await resolve_bot_display_name(group_id)
+    problem_body_image = await render_problem_card_body_image(post_msg)
     nodes = build_problem_card_nodes(
         post_msg=post_msg,
         sample_messages=list(sample_messages),
@@ -271,12 +275,14 @@ async def _send_problem_forward_card(
         snake_enabled=snake_enabled,
         bot_qq=cfg.bot_qq,
         bot_name=bot_name,
+        problem_body_image=problem_body_image,
     )
     fwd_resp = await send_forward_card_with_legacy_fallback(
         destination="group", group_id=group_id, nodes=nodes,
         self_send_messages=build_problem_card_legacy_segments(
             post_msg=post_msg, sample_messages=list(sample_messages),
             notes_message=notes_message or "", snake_enabled=snake_enabled,
+            problem_body_image=problem_body_image,
         ),
     )
     return fwd_resp, {"node_count": len(nodes)}
