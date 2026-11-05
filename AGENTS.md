@@ -62,8 +62,10 @@ NapCat (QQ) ──WS──> worker.py
   rendered from self-contained HTML in headless Playwright Chromium, then keep
   samples/notes as separate text nodes. Delimited LaTeX is converted offline to
   native MathML with `latex2mathml`; legacy Unicode super/subscripts become real
-  HTML scripts, and trailing time/memory limits are promoted into a compact metadata
-  panel. Rendering runs in a worker thread and the resulting base64 PNG is reused by
+  HTML scripts, common LLM JSON damage (`\\(` double escaping and control characters
+  produced by `\bmod`/`\times`/`\frac`) is normalized back to canonical LaTeX, and
+  trailing time/memory limits are promoted into a compact metadata panel. Rendering
+  runs in a worker thread and the resulting base64 PNG is reused by
   both custom-node and legacy self-send paths. If Chromium is unavailable, the
   renderer falls back to Pillow (`KOUHAI_CARD_FONT`, then common Noto CJK,
   WenQuanYi, and macOS paths); total render failure degrades to the original text

@@ -649,6 +649,27 @@ _PROBLEM_CARD_LIMITS_RE = re.compile(
     re.I,
 )
 
+_PROBLEM_CARD_JSON_CONTROL_ESCAPES = {
+    "\x08": r"\b",
+    "\x0c": r"\f",
+    "\r": r"\r",
+    "\t": r"\t",
+}
+
+
+def normalize_problem_card_math_text(text: str) -> str:
+    r"""Repair common LLM JSON escaping damage before LaTeX parsing.
+
+    A model may double every LaTeX backslash in the decoded JSON value, while
+    JSON-valid prefixes such as ``\b``/``\t`` can instead become control
+    characters. Normalize both forms so the renderer and persisted summary see
+    one canonical LaTeX stream.
+    """
+    normalized = str(text or "")
+    for control, latex_prefix in _PROBLEM_CARD_JSON_CONTROL_ESCAPES.items():
+        normalized = normalized.replace(control, latex_prefix)
+    return re.sub(r"\\{2,}(?=[A-Za-z()\[\]])", r"\\", normalized)
+
 
 def _problem_card_font(size: int) -> ImageFont.FreeTypeFont:
     configured = os.environ.get("KOUHAI_CARD_FONT", "").strip()
@@ -784,6 +805,7 @@ def build_problem_card_html(text: str) -> str:
     model_tag = text[len(plain_summary):].strip() if text.startswith(plain_summary) else ""
     if plain_summary:
         text = plain_summary
+    text = normalize_problem_card_math_text(text)
 
     limits = _PROBLEM_CARD_LIMITS_RE.match(text)
     time_limit = ""
@@ -2126,7 +2148,7 @@ _SUMMARY_UNICODE_NOTATION_GUIDE = (
 
 
 def _polish_summary_notation(summary: str) -> str:
-    return summary.strip()
+    return normalize_problem_card_math_text(summary).strip()
 
 
 def _summary_system_prompt() -> str:

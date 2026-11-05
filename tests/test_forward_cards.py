@@ -280,6 +280,26 @@ def test_problem_card_html_escapes_untrusted_summary_markup():
     assert "<msup>" in html
 
 
+def test_problem_card_html_repairs_llm_json_latex_escapes():
+    damaged = (
+        r"给定 \\(n,m\\)，求 \\(\\sum_{i=1}^{m}(n"
+        + "\x08"
+        + r"mod i)\\) 对 \\(10^9+7\\) 取模。时限2s，内存256MB。"
+    )
+
+    normalized = shared.normalize_problem_card_math_text(damaged)
+    html = shared.build_problem_card_html(damaged)
+
+    assert normalized == (
+        r"给定 \(n,m\)，求 \(\sum_{i=1}^{m}(n\bmod i)\) "
+        r"对 \(10^9+7\) 取模。时限2s，内存256MB。"
+    )
+    assert "\x08" not in html
+    assert "<msubsup>" in html
+    assert "mod" in html
+    assert "时间限制" in html
+
+
 def test_legacy_problem_card_upgrade_regenerates_current_summary(monkeypatch):
     from kouhai_bot.handlers.cmd import stubs
     from kouhai_bot.problem_summary import SummaryPreparationStatus
