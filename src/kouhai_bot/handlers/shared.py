@@ -261,6 +261,10 @@ async def parse_json_with_llm_repair(
 _MAX_MULTIMODAL_IMAGES = 8
 
 
+class RequiredStatementImageUnavailable(RuntimeError):
+    """A statement image with no usable text fallback could not reach the LLM."""
+
+
 def load_problem_statement_json(pid: str) -> dict:
     """Load raw problem statement cache JSON."""
     return load_statement_json(pid)
@@ -398,19 +402,31 @@ def _omitted_image_note(omitted: list[dict]) -> str:
     )
 
 
-async def _build_image_content_parts(display_idx: int, image: dict) -> list[dict]:
+async def _build_image_content_parts(
+    display_idx: int,
+    image: dict,
+    *,
+    require_downloaded: bool = False,
+) -> list[dict]:
     src = str(image.get("src", "") or "").strip()
     kind = _image_kind(image)
     marker = _image_marker(image, display_idx)
     placeholder = _image_placeholder(image, display_idx)
     context = str(image.get("context", "") or "").strip()
     label = f"题面图片 {marker}（{kind}），对应原文占位符：{placeholder}"
+    alt = str(image.get("alt", "") or "").strip()
+    if alt and alt not in placeholder:
+        label += f"，文本替代：{alt[:500]}"
     if context:
         label += f"，附近文本：{context[:500]}"
     try:
         image_url = await _download_image_data_url_async(src)
     except Exception as e:
         logger.warning("failed to download statement image %s: %s", src, e)
+        if require_downloaded and not _image_has_text_fallback(image):
+            raise RequiredStatementImageUnavailable(
+                f"required statement image {marker} could not be downloaded"
+            ) from e
         image_url = src
     return [
         {"type": "text", "text": "\n\n" + label},
@@ -418,12 +434,36 @@ async def _build_image_content_parts(display_idx: int, image: dict) -> list[dict
     ]
 
 
-async def build_multimodal_user_content(text: str, images: list[dict]) -> list[dict]:
-    """Build OpenAI-compatible text+image content parts."""
+async def build_multimodal_user_content(
+    text: str,
+    images: list[dict],
+    *,
+    require_complete: bool = False,
+) -> list[dict]:
+    """Build OpenAI-compatible text+image content parts.
+
+    With ``require_complete``, every image lacking a textual formula fallback must
+    be attached as downloaded data. This prevents summaries from silently using an
+    incomplete statement when a constraint exists only in an image.
+    """
     content: list[dict] = [{"type": "text", "text": text}]
     selected, omitted = _select_images_for_attachment(images)
+    if require_complete:
+        missing = [image for image in omitted if not _image_has_text_fallback(image)]
+        if missing:
+            markers = ", ".join(
+                _image_marker(image, idx)
+                for idx, image in enumerate(missing, 1)
+            )
+            raise RequiredStatementImageUnavailable(
+                f"required statement images exceed attachment limit: {markers}"
+            )
     image_parts = await asyncio.gather(*[
-        _build_image_content_parts(idx, image)
+        _build_image_content_parts(
+            idx,
+            image,
+            require_downloaded=require_complete,
+        )
         for idx, image in enumerate(selected, 1)
     ])
     for parts in image_parts:
@@ -437,8 +477,21 @@ def _usable_statement_images(images: list[dict] | None) -> list[dict]:
     return [item for item in images or [] if isinstance(item, dict) and item.get("src")]
 
 
-async def _multimodal_content_or_text(text: str, images: list[dict]) -> str | list[dict]:
-    return await build_multimodal_user_content(text, images) if images else text
+async def _multimodal_content_or_text(
+    text: str,
+    images: list[dict],
+    *,
+    require_complete: bool = False,
+) -> str | list[dict]:
+    return (
+        await build_multimodal_user_content(
+            text,
+            images,
+            require_complete=require_complete,
+        )
+        if images
+        else text
+    )
 
 
 # ── Today's problem ─────────────────────────────────────────────────────
@@ -2436,8 +2489,8 @@ def _build_summary_doublecheck_prompt(
         "主动尝试用最小合法规模验证简述是否仍可执行。\n"
         "4. 只报告会改变题意、让过程无法执行或可能导致错误答案的实质问题。"
         "允许忠实压缩和自然中文改写；不要因为省略背景、普通输入格式、脚注例子或样例推导而判错。\n"
-        "5. source 中的 [[IMAGE_x: ...]] 是题面图片占位符。general model 看不到图片时，"
-        "不要仅因简述包含可能来自图片的细节就判错；这些细节属于本次审校范围外，但仍要检查它们是否与可见文字冲突。\n"
+        "5. source 中的 [[IMAGE_x: ...]] 是题面图片占位符，对应原图已作为多模态附件提供。"
+        "必须阅读这些图片并核对其中的公式、定义和数据范围；图片内容与可见文字具有同等效力。\n"
         "6. 不要在 issue 中给算法、复杂度或解题提示，只说明简述与原题的最小差异。\n\n"
         "输出格式：\n"
         '{"accurate":true,"issues":[]}\n'
@@ -2485,23 +2538,27 @@ async def doublecheck_problem_summary(
     input_text: str,
     limits_text: str,
     summary: str,
+    images: list[dict] | None = None,
 ) -> SummaryDoublecheckResult:
     """Use the general-model queue to compare a summary against its source."""
     cfg = get_config()
+    image_items = _usable_statement_images(images)
+    user_content = await _multimodal_content_or_text(
+        _build_summary_doublecheck_prompt(
+            stmt_text,
+            input_text,
+            limits_text,
+            summary,
+        ),
+        image_items,
+        require_complete=True,
+    )
     result = await call_chat_completion_result(
         [
             {"role": "system", "content": _summary_doublecheck_system_prompt()},
-            {
-                "role": "user",
-                "content": _build_summary_doublecheck_prompt(
-                    stmt_text,
-                    input_text,
-                    limits_text,
-                    summary,
-                ),
-            },
+            {"role": "user", "content": user_content},
         ],
-        task="summary",
+        task="multimodal_summary" if image_items else "summary",
         temperature=0.0,
         timeout=cfg.summary_timeout_sec,
         response_format={"type": "json_object"},
@@ -2559,22 +2616,26 @@ async def _repair_summary_candidate(
     issues: list[str | dict[str, str]],
     *,
     timeout: int,
+    images: list[dict] | None = None,
 ) -> tuple[str | None, str]:
+    image_items = _usable_statement_images(images)
+    user_content = await _multimodal_content_or_text(
+        _build_summary_repair_prompt(
+            stmt_text,
+            input_text,
+            limits_text,
+            summary,
+            issues,
+        ),
+        image_items,
+        require_complete=True,
+    )
     repair_result = await call_chat_completion_result(
         [
             {"role": "system", "content": _summary_system_prompt()},
-            {
-                "role": "user",
-                "content": _build_summary_repair_prompt(
-                    stmt_text,
-                    input_text,
-                    limits_text,
-                    summary,
-                    issues,
-                ),
-            },
+            {"role": "user", "content": user_content},
         ],
-        task="summary",
+        task="multimodal_summary" if image_items else "summary",
         temperature=0.2,
         timeout=timeout,
         response_format={"type": "json_object"},
@@ -2619,7 +2680,11 @@ async def summarize_problem(
     cfg = get_config()
     image_items = _usable_statement_images(images)
     user_prompt = _build_summary_prompt(stmt_text, input_text, limits_text)
-    user_content = await _multimodal_content_or_text(user_prompt, image_items)
+    user_content = await _multimodal_content_or_text(
+        user_prompt,
+        image_items,
+        require_complete=True,
+    )
     messages = [
         {"role": "system", "content": _summary_system_prompt()},
         {"role": "user", "content": user_content},
@@ -2652,6 +2717,7 @@ async def summarize_problem(
             summary,
             list(issues),
             timeout=cfg.summary_timeout_sec,
+            images=image_items,
         )
         if not summary:
             return None, ""
@@ -2661,6 +2727,7 @@ async def summarize_problem(
         input_text,
         limits_text,
         summary,
+        images=image_items,
     )
     if check.accurate is None:
         logger.warning("summary double-check failed: %s", check.failure_kind)
@@ -2676,6 +2743,7 @@ async def summarize_problem(
         summary,
         [dict(issue) for issue in check.issues],
         timeout=cfg.summary_timeout_sec,
+        images=image_items,
     )
     if not repaired:
         return None, ""
@@ -2685,6 +2753,7 @@ async def summarize_problem(
         input_text,
         limits_text,
         repaired,
+        images=image_items,
     )
     if repaired_check.accurate is not True:
         logger.warning(

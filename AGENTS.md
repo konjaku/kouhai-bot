@@ -851,10 +851,12 @@ newer AC can silently retarget an older review request.
    translated notes, and calls the summary action. The picker marks candidates used and
    caches statements but does **not** write `state.json`.
 2. The summary action calls `summarize_problem()` through `llm.general_model`, using
-   `llm.summary_timeout_sec`; after the local format/limit/symbol-scope gate it runs the
-   general-model semantic double-check. A mismatch is repaired from structured issues
-   and checked again before the action can return READY. If both outer attempts remain
-   incomplete, the established no-summary publication fallback is retained explicitly.
+   `llm.summary_timeout_sec`. Statement images without a textual fallback are required
+   inputs: generation fails closed if one cannot be downloaded or exceeds the attachment
+   cap. Generation, repair, and the independent semantic double-check all receive the
+   same statement images. A mismatch is repaired from structured issues and checked
+   again before the action can return READY. If both outer attempts remain incomplete,
+   the established no-summary publication fallback is retained explicitly.
 3. `/newproblem` claims the READY slot (or awaits that same single-flight preparation on
    a cold start) and formats the previous-problem reveal from current state.
 4. Assemble the card as custom sender-attributed nodes — summary text; each sample as an
@@ -1214,6 +1216,9 @@ All must match exactly. See the commit history for the iterative alignment proce
 problem-card renderer can preserve mathematical structure. Markdown remains
 forbidden. Keep subscript scope exact (`p_i+1` is not `p_{i+1}`), and remember that
 the summary is JSON, so model-produced backslashes must be valid JSON escapes.
+Formula/diagram images with no alt text are mandatory semantic input for summary
+generation and every audit/repair pass; never fall back to their remote URL or publish
+an image-derived summary when those attachments could not be delivered to the model.
 
 ### 19. Annotation detail pages must not block on translation
 The annotation UI can show a placeholder for `summary_zh`, then fetch translation

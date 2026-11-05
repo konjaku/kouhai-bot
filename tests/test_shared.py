@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from kouhai_bot.config import BotConfig
 from kouhai_bot.llm_config import LlmProviderConfig
 from kouhai_bot.handlers.shared import (
+    RequiredStatementImageUnavailable,
     SummaryDoublecheckResult,
     build_judge_messages,
     build_multimodal_user_content,
@@ -548,7 +549,7 @@ def test_summarize_problem_with_images_uses_multimodal_task():
 
     async def fake_call(messages, **kwargs):
         calls.append({"messages": messages, **kwargs})
-        if kwargs["task"] == "summary":
+        if "独立语义审校员" in messages[0]["content"]:
             return ChatCompletionResult(
                 text=json.dumps({"accurate": True, "issues": []}),
                 model_tag="『T』",
@@ -571,11 +572,17 @@ def test_summarize_problem_with_images_uses_multimodal_task():
     assert summary == "带图题意"
     assert tag == "『MMx』"
     assert calls[0]["task"] == "multimodal_summary"
-    assert calls[1]["task"] == "summary"
+    assert calls[1]["task"] == "multimodal_summary"
     content = calls[0]["messages"][1]["content"]
     assert isinstance(content, list)
     assert content[0]["type"] == "text"
     assert content[-1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
+    checker_content = calls[1]["messages"][1]["content"]
+    assert isinstance(checker_content, list)
+    assert checker_content[-1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,abc"},
+    }
 
 
 def test_translate_sample_notes_with_images_uses_multimodal_task():
@@ -698,6 +705,170 @@ def test_multimodal_content_prioritizes_images_without_text_fallback():
     assert "未随请求发送" in omitted_note
     assert "https://codeforces.com/7.png" not in downloaded_urls
     assert "https://codeforces.com/8.png" not in downloaded_urls
+
+
+def test_complete_multimodal_content_fails_when_required_image_download_fails():
+    image = {
+        "src": "https://espresso.codeforces.com/constraint.png",
+        "kind": "formula",
+        "marker": "IMAGE_2",
+        "alt": "",
+    }
+
+    with patch(
+        "kouhai_bot.handlers.shared._download_image_data_url_async",
+        AsyncMock(side_effect=RuntimeError("403 Forbidden")),
+    ), pytest.raises(RequiredStatementImageUnavailable, match="IMAGE_2"):
+        asyncio.run(build_multimodal_user_content(
+            "statement",
+            [image],
+            require_complete=True,
+        ))
+
+
+def test_complete_multimodal_content_rejects_omitted_required_image():
+    images = [
+        {
+            "src": f"https://codeforces.com/{idx}.png",
+            "kind": "formula",
+            "marker": f"IMAGE_{idx}",
+            "alt": "",
+        }
+        for idx in range(1, 10)
+    ]
+
+    with pytest.raises(
+        RequiredStatementImageUnavailable,
+        match="attachment limit",
+    ):
+        asyncio.run(build_multimodal_user_content(
+            "statement",
+            images,
+            require_complete=True,
+        ))
+
+
+def test_complete_multimodal_content_can_use_formula_alt_fallback():
+    image = {
+        "src": "https://espresso.codeforces.com/formula.png",
+        "kind": "formula",
+        "marker": "IMAGE_1",
+        "alt": "1 <= N <= 100000",
+    }
+
+    with patch(
+        "kouhai_bot.handlers.shared._download_image_data_url_async",
+        AsyncMock(side_effect=RuntimeError("403 Forbidden")),
+    ):
+        content = asyncio.run(build_multimodal_user_content(
+            "statement",
+            [image],
+            require_complete=True,
+        ))
+
+    assert "文本替代：1 <= N <= 100000" in content[1]["text"]
+    assert content[2]["image_url"]["url"] == image["src"]
+
+
+def test_cf852f_image_only_constraints_reach_generation_and_audit():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+    expected = (
+        "给定长度为 N、初始元素均为 a 的数组，进行 M 次同步乘法变换并输出最终数组，"
+        "结果对素数 Q 取模。1≤N≤10⁵，0≤M≤10⁹+123，2≤a≤10⁶+123，"
+        "7≤Q≤10⁹+123，且 a 模 Q 的乘法阶至少为 N。时限3s，内存256MB。"
+    )
+    images = [
+        {
+            "src": "https://espresso.codeforces.com/2ac3dce719aaa3202862fcb75cce57e5994e48b1.png",
+            "kind": "formula",
+            "marker": "IMAGE_2",
+            "placeholder": "[[IMAGE_2: formula]]",
+            "alt": "",
+        },
+        {
+            "src": "https://espresso.codeforces.com/9e311783e65b119bb1fd35c8a4f2a4d6933d358d.png",
+            "kind": "formula",
+            "marker": "IMAGE_3",
+            "placeholder": "[[IMAGE_3: formula]]",
+            "alt": "",
+        },
+    ]
+    calls = []
+
+    async def fake_call(messages, **kwargs):
+        calls.append({"messages": messages, **kwargs})
+        if "独立语义审校员" in messages[0]["content"]:
+            return ChatCompletionResult(
+                text=json.dumps({"accurate": True, "issues": []}),
+                model_tag="checker",
+            )
+        return ChatCompletionResult(
+            text=json.dumps({"summary": expected}, ensure_ascii=False),
+            model_tag="vision",
+        )
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch(
+                "kouhai_bot.handlers.shared._download_image_data_url_async",
+                AsyncMock(side_effect=[
+                    "data:image/png;base64,constraints-generation",
+                    "data:image/png;base64,order-generation",
+                    "data:image/png;base64,constraints-audit",
+                    "data:image/png;base64,order-audit",
+                ]),
+            ), \
+            patch(
+                "kouhai_bot.handlers.shared.call_chat_completion_result",
+                side_effect=fake_call,
+            ):
+        summary, tag = asyncio.run(summarize_problem(
+            "The limits are [[IMAGE_2: formula]].",
+            "The multiplicative order condition is [[IMAGE_3: formula]].",
+            "Time: 3 seconds, Memory: 256 megabytes",
+            images,
+        ))
+
+    assert summary == expected
+    assert tag == "vision"
+    assert "1≤N≤10⁵" in summary
+    assert "0≤M≤10⁹+123" in summary
+    assert "乘法阶至少为 N" in summary
+    assert [call["task"] for call in calls] == [
+        "multimodal_summary",
+        "multimodal_summary",
+    ]
+    for call in calls:
+        content = call["messages"][1]["content"]
+        assert len([part for part in content if part["type"] == "image_url"]) == 2
+
+
+def test_summarize_problem_does_not_call_model_without_required_image():
+    cfg = _openai_cfg(summary_timeout_sec=321)
+    model_call = AsyncMock()
+
+    with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
+            patch(
+                "kouhai_bot.handlers.shared._download_image_data_url_async",
+                AsyncMock(side_effect=RuntimeError("403 Forbidden")),
+            ), \
+            patch(
+                "kouhai_bot.handlers.shared.call_chat_completion_result",
+                model_call,
+            ), \
+            pytest.raises(RequiredStatementImageUnavailable):
+        asyncio.run(summarize_problem(
+            "Limits: [[IMAGE_2: formula]].",
+            "",
+            "",
+            [{
+                "src": "https://espresso.codeforces.com/constraint.png",
+                "kind": "formula",
+                "marker": "IMAGE_2",
+                "alt": "",
+            }],
+        ))
+
+    model_call.assert_not_awaited()
 
 
 def test_task_entrypoints_are_blackbox_except_model_class_and_tag():
