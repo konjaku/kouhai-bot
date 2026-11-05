@@ -203,6 +203,96 @@ async def test_chat_completion_skips_out_of_range_provider_without_attempt(monke
     assert attempts == ["second"]
 
 
+@pytest.mark.asyncio
+async def test_reasoning_only_response_retries_once_without_thinking(monkeypatch, caplog):
+    provider = LlmProviderConfig(
+        name="deepseek",
+        api_key="key",
+        base_url="http://localhost/v1",
+        model="deepseek-flash",
+        reasoning_effort="high",
+    )
+    cfg = BotConfig(
+        llm_smart_providers=[provider],
+        llm_general_providers=[provider],
+        llm_max_retries=0,
+    )
+    payloads = []
+    results = [
+        _ChatCompletionAttempt(
+            text=None,
+            retryable=False,
+            retry_after_sec=None,
+            failure_kind="empty_content_after_reasoning",
+            finish_reason="stop",
+            reasoning_chars=82,
+        ),
+        _ChatCompletionAttempt(
+            text='{"reply":"必须移动到被吃棋子所在格","reaction":""}',
+            retryable=False,
+            retry_after_sec=None,
+        ),
+    ]
+
+    async def fake_once(_session, **kwargs):
+        payloads.append(kwargs["payload"].copy())
+        return results[len(payloads) - 1]
+
+    monkeypatch.setattr("kouhai_bot.llm.get_config", lambda: cfg)
+    monkeypatch.setattr("kouhai_bot.llm.aiohttp.ClientSession", _DummySession)
+    monkeypatch.setattr("kouhai_bot.llm._post_chat_completion_once", fake_once)
+
+    with caplog.at_level("WARNING", logger="kouhai-bot.llm"):
+        result = await chat_completion(
+            [{"role": "user", "content": "clarify"}],
+            task="clarify",
+            response_format={"type": "json_object"},
+            thinking={"type": "enabled"},
+        )
+
+    assert result.text == '{"reply":"必须移动到被吃棋子所在格","reaction":""}'
+    assert payloads[0]["thinking"] == {"type": "enabled"}
+    assert payloads[0]["reasoning_effort"] == "high"
+    assert "thinking" not in payloads[1]
+    assert "reasoning_effort" not in payloads[1]
+    assert "retrying once without thinking controls" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_response_without_thinking_is_not_duplicated(monkeypatch):
+    provider = _provider("deepseek")
+    cfg = BotConfig(
+        llm_smart_providers=[provider],
+        llm_general_providers=[provider],
+        llm_max_retries=0,
+    )
+    calls = []
+
+    async def fake_once(_session, **kwargs):
+        calls.append(kwargs["payload"].copy())
+        return _ChatCompletionAttempt(
+            text=None,
+            retryable=False,
+            retry_after_sec=None,
+            failure_kind="empty_content_after_reasoning",
+            finish_reason="stop",
+            reasoning_chars=82,
+        )
+
+    monkeypatch.setattr("kouhai_bot.llm.get_config", lambda: cfg)
+    monkeypatch.setattr("kouhai_bot.llm.aiohttp.ClientSession", _DummySession)
+    monkeypatch.setattr("kouhai_bot.llm._post_chat_completion_once", fake_once)
+
+    result = await chat_completion(
+        [{"role": "user", "content": "clarify"}],
+        task="clarify",
+    )
+
+    assert result.text is None
+    assert result.failure_kind == "empty_content_after_reasoning"
+    assert len(calls) == 1
+
+
 class _ScriptedContent:
     """Async line stream over a (delay, line) script, mimicking resp.content."""
 

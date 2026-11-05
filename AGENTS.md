@@ -1235,6 +1235,10 @@ commands are blocked.
 The upstream API silently ignores fields it doesn't support. The JSON output format
 may occasionally break if extra reasoning content leaks into the response —
 `robust_json_parse` handles this.
+If a provider finishes with reasoning content but no answer text, the shared LLM
+transport retries that request once with thinking controls removed. Do not expose the
+reasoning content as the user-visible answer, and do not fail `/clarify` before this
+answer-only fallback has been attempted.
 
 ### 22. `uv run start` / `restart` / `stop` / `status` are selected by NapCat WS port
 The `start`, `restart`, `stop`, and `status` entrypoints must use the configured `NAPCAT_WS_PORT` to

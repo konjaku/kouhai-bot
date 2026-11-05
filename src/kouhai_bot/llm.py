@@ -125,6 +125,19 @@ def _chat_completions_url(base_url: str) -> str:
     return f"{base}/chat/completions"
 
 
+def _without_thinking_controls(payload: dict) -> dict:
+    """Return an answer-only retry payload without hidden-reasoning controls."""
+    fallback = payload.copy()
+    for key in (
+        "thinking",
+        "enable_thinking",
+        "thinking_budget",
+        "reasoning_effort",
+    ):
+        fallback.pop(key, None)
+    return fallback
+
+
 def strip_leaked_thinking(text: str) -> str:
     """Remove provider-leaked thinking tags from user-visible content."""
     if not text:
@@ -822,6 +835,34 @@ async def chat_completion(
                     stream_idle_timeout_sec=stream_idle_timeout_sec,
                     stream_progress_timeout_sec=stream_progress_timeout_sec,
                 )
+                if (
+                    result.failure_kind == "empty_content_after_reasoning"
+                    and any(
+                        key in payload
+                        for key in (
+                            "thinking",
+                            "enable_thinking",
+                            "thinking_budget",
+                            "reasoning_effort",
+                        )
+                    )
+                ):
+                    logger.warning(
+                        "%s API returned reasoning without answer text; "
+                        "retrying once without thinking controls",
+                        provider.name,
+                    )
+                    payload = _without_thinking_controls(payload)
+                    result = await _post_chat_completion_once(
+                        session,
+                        provider_name=provider.name,
+                        base_url=provider.base_url,
+                        headers=headers,
+                        payload=payload,
+                        timeout=timeout,
+                        stream_idle_timeout_sec=stream_idle_timeout_sec,
+                        stream_progress_timeout_sec=stream_progress_timeout_sec,
+                    )
                 if result.text is not None:
                     if last_failed_provider:
                         logger.info(
