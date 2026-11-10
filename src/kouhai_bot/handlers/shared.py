@@ -496,8 +496,8 @@ async def _multimodal_content_or_text(
 
 # ── Today's problem ─────────────────────────────────────────────────────
 
-PROBLEM_SUMMARY_FORMAT_VERSION = 3
-PROBLEM_CARD_FORMAT_VERSION = 2
+PROBLEM_SUMMARY_FORMAT_VERSION = 4
+PROBLEM_CARD_FORMAT_VERSION = 3
 
 
 def _today_state_file(group_id: int) -> str:
@@ -2185,6 +2185,15 @@ _SUMMARY_RENDERED_MATH_GUIDE = (
     "\\(10^9+7\\)、\\(x \\bmod y\\)、\\(1 \\le n \\le 2\\times10^5\\)。"
     "端点无法从 source 直接确认时改用自然语言，不要猜测下标终点。"
 )
+
+_SUMMARY_RAW_TEX_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
+_SUMMARY_RAW_ASCII_SCRIPT_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:[A-Za-z]|\d+)"
+    r"(?:_(?:\{[^{}\n]+\}|[A-Za-z0-9]+)|\^(?:\{[^{}\n]+\}|[A-Za-z0-9]+))"
+)
+_SUMMARY_RAW_VARIABLE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<variable>[A-Za-z])(?![A-Za-z0-9_])"
+)
 _SUMMARY_UNICODE_NOTATION_GUIDE = (
     "Unicode 角标白名单：只使用下面明确列出的字符，不要自己创造看起来像角标的字母。"
     "下标数字：₀₁₂₃₄₅₆₇₈₉；"
@@ -2202,6 +2211,45 @@ _SUMMARY_UNICODE_NOTATION_GUIDE = (
 
 def _polish_summary_notation(summary: str) -> str:
     return normalize_problem_card_math_text(summary).strip()
+
+
+def _summary_rendering_issues(summary: str) -> list[str]:
+    r"""Reject math-like source that would be printed as literal card text.
+
+    The card renderer deliberately converts only explicitly delimited LaTeX.
+    Guessing formula boundaries during rendering can silently change subscript
+    scope, so malformed summaries must go through the existing LLM repair and
+    semantic audit instead.
+    """
+    outside_math = _PROBLEM_CARD_TEX_RE.sub(" ", str(summary or ""))
+    samples: list[str] = []
+
+    tex_command = _SUMMARY_RAW_TEX_COMMAND_RE.search(outside_math)
+    if tex_command:
+        samples.append(tex_command.group(0))
+
+    ascii_script = _SUMMARY_RAW_ASCII_SCRIPT_RE.search(outside_math)
+    if ascii_script:
+        samples.append(ascii_script.group(0))
+
+    unicode_script = _PROBLEM_CARD_SCRIPT_RE.search(outside_math)
+    if unicode_script:
+        samples.append(unicode_script.group(0))
+
+    variable = _SUMMARY_RAW_VARIABLE_RE.search(outside_math)
+    if variable:
+        samples.append(variable.group("variable"))
+
+    if not samples:
+        return []
+    unique_samples = list(dict.fromkeys(samples))
+    return [
+        "summary contains undelimited math that the problem-card renderer would "
+        "print literally (examples: "
+        + ", ".join(repr(value) for value in unique_samples)
+        + "); wrap every mathematical variable/expression in \\( ... \\) "
+        "or \\[ ... \\]"
+    ]
 
 
 def _summary_system_prompt() -> str:
@@ -2414,6 +2462,7 @@ def _summary_candidate_issues(
 ) -> list[str]:
     return [
         *_summary_quality_issues(summary, limits_text),
+        *_summary_rendering_issues(summary),
         *_summary_symbol_scope_issues(f"{stmt_text}\n{input_text}", summary),
         *_summary_required_convention_issues(f"{stmt_text}\n{input_text}", summary),
     ]

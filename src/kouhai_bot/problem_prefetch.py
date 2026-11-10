@@ -25,7 +25,7 @@ from .problem_preparation import (
 
 logger = logging.getLogger("kouhai-bot.problem_prefetch")
 
-SLOT_FORMAT_VERSION = 3
+SLOT_FORMAT_VERSION = 4
 DEFAULT_RETRY_INTERVAL_SEC = 60.0
 
 

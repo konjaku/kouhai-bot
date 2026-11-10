@@ -65,7 +65,10 @@ NapCat (QQ) ──WS──> worker.py
   HTML scripts, common LLM JSON damage (`\\(` double escaping and control characters
   produced by `\bmod`/`\times`/`\frac`) is normalized back to canonical LaTeX, and
   trailing time/memory limits are promoted into a compact metadata panel. Rendering
-  runs in a worker thread and the resulting base64 PNG is reused by
+  never guesses formula boundaries: the summary quality gate rejects raw TeX commands,
+  ASCII/Unicode scripts, and standalone mathematical variables outside `\(...\)` or
+  `\[...\]`, then sends the candidate through the existing repair + semantic audit.
+  Rendering runs in a worker thread and the resulting base64 PNG is reused by
   both custom-node and legacy self-send paths. If Chromium is unavailable, the
   renderer falls back to Pillow (`KOUHAI_CARD_FONT`, then common Noto CJK,
   WenQuanYi, and macOS paths); total render failure degrades to the original text
@@ -1223,6 +1226,11 @@ All must match exactly. See the commit history for the iterative alignment proce
 problem-card renderer can preserve mathematical structure. Markdown remains
 forbidden. Keep subscript scope exact (`p_i+1` is not `p_{i+1}`), and remember that
 the summary is JSON, so model-produced backslashes must be valid JSON escapes.
+The deterministic rendering gate must reject undelimited raw commands (`\ldots`),
+scripts (`w_i`, `10^9`, Unicode angles), and standalone variables; do not auto-wrap
+them at render time because guessing formula boundaries can change mathematical scope.
+When this policy changes, bump summary/card/prefetch format versions so `/problem`
+regenerates the current legacy summary and stale READY slots cannot be published.
 Formula/diagram images with no alt text are mandatory semantic input for summary
 generation and every audit/repair pass; never fall back to their remote URL or publish
 an image-derived summary when those attachments could not be delivered to the model.

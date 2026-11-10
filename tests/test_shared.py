@@ -20,6 +20,7 @@ from kouhai_bot.handlers.shared import (
     build_second_judge_messages,
     _build_summary_prompt,
     _build_summary_repair_prompt,
+    _summary_rendering_issues,
     _summary_required_convention_issues,
     _summary_symbol_scope_issues,
     call_chat_completion,
@@ -773,9 +774,10 @@ def test_complete_multimodal_content_can_use_formula_alt_fallback():
 def test_cf852f_image_only_constraints_reach_generation_and_audit():
     cfg = _openai_cfg(summary_timeout_sec=321)
     expected = (
-        "给定长度为 N、初始元素均为 a 的数组，进行 M 次同步乘法变换并输出最终数组，"
-        "结果对素数 Q 取模。1≤N≤10⁵，0≤M≤10⁹+123，2≤a≤10⁶+123，"
-        "7≤Q≤10⁹+123，且 a 模 Q 的乘法阶至少为 N。时限3s，内存256MB。"
+        "给定长度为 \\(N\\)、初始元素均为 \\(a\\) 的数组，进行 \\(M\\) 次同步乘法变换并输出最终数组，"
+        "结果对素数 \\(Q\\) 取模。\\(1\\le N\\le10^5\\)，\\(0\\le M\\le10^9+123\\)，"
+        "\\(2\\le a\\le10^6+123\\)，\\(7\\le Q\\le10^9+123\\)，"
+        "且 \\(a\\) 模 \\(Q\\) 的乘法阶至少为 \\(N\\)。时限3s，内存256MB。"
     )
     images = [
         {
@@ -830,9 +832,9 @@ def test_cf852f_image_only_constraints_reach_generation_and_audit():
 
     assert summary == expected
     assert tag == "vision"
-    assert "1≤N≤10⁵" in summary
-    assert "0≤M≤10⁹+123" in summary
-    assert "乘法阶至少为 N" in summary
+    assert r"\(1\le N\le10^5\)" in summary
+    assert r"\(0\le M\le10^9+123\)" in summary
+    assert r"乘法阶至少为 \(N\)" in summary
     assert [call["task"] for call in calls] == [
         "multimodal_summary",
         "multimodal_summary",
@@ -1192,6 +1194,33 @@ def test_summary_prompt_requires_renderable_latex_notation():
         assert "孤立点也算" in text
 
 
+def test_summary_rendering_gate_rejects_the_broken_2189d1_notation():
+    summary = (
+        r"多测。每组给定 n,c 和长度 n 的 0/1 串 s（保证 s 不含 ?）。"
+        r"对串 w，f(w) 表示 [0,1,\ldots,n-1] 的排列 p 的数量；"
+        r"对每个 i=1,\ldots,n，w_i=1 时满足条件。"
+        r"答案对 10^9+7 取模；\(1\le t\le10^4\)。"
+    )
+
+    issues = _summary_rendering_issues(summary)
+
+    assert len(issues) == 1
+    assert "undelimited math" in issues[0]
+    assert "\\ldots" in issues[0]
+    assert "w_i" in issues[0]
+
+
+def test_summary_rendering_gate_accepts_delimited_math_and_plain_units():
+    summary = (
+        r"多测。每组给定 \(n,c\) 和长度为 \(n\) 的 0/1 串 \(s\)，"
+        r"其中字符可以是 ?。对 \(w\)，\(f(w)\) 表示排列 "
+        r"\([0,1,\ldots,n-1]\) 的数量。答案对 \(10^9+7\) 取模。"
+        r"时限2s，内存256MB。"
+    )
+
+    assert _summary_rendering_issues(summary) == []
+
+
 def test_summary_symbol_scope_gate_distinguishes_addition_from_next_index():
     source = "Use components containing vertices p_i and p_i+1 respectively."
 
@@ -1277,7 +1306,10 @@ def test_summarize_problem_repairs_solution_leak_and_format_sections():
         "给定数组 a。\n输入：第一行 n。\n输出：答案。"
         "解题思路是枚举每个位置即可，复杂度 O(n)。"
     )
-    fixed = "给定长度为 n 的数组 a，要求计算满足题目条件的答案并输出。n≤10⁵，时限 1s。"
+    fixed = (
+        r"给定长度为 \(n\) 的数组 \(a\)，要求计算满足题目条件的答案并输出。"
+        r"\(n\le10^5\)，时限 1s。"
+    )
 
     async def fake_call_chat(messages, **kwargs):
         calls.append({"messages": messages, **kwargs})
@@ -1346,8 +1378,11 @@ def test_summarize_problem_rejects_indeterminate_semantic_check():
 def test_summarize_problem_repairs_missing_time_and_memory_limits():
     cfg = _openai_cfg(summary_timeout_sec=321)
     calls = []
-    first = "给定长度为 n 的数组 a，要求输出答案。n≤10⁵。"
-    fixed = "给定长度为 n 的数组 a，要求输出答案。n≤10⁵，时限2s，内存256MB。"
+    first = r"给定长度为 \(n\) 的数组 \(a\)，要求输出答案。\(n\le10^5\)。"
+    fixed = (
+        r"给定长度为 \(n\) 的数组 \(a\)，要求输出答案。"
+        r"\(n\le10^5\)，时限2s，内存256MB。"
+    )
 
     async def fake_call_chat(messages, **kwargs):
         calls.append(messages[-1]["content"])
@@ -1373,12 +1408,19 @@ def test_summarize_problem_repairs_missing_time_and_memory_limits():
     assert "summary omits memory limit" in calls[1]
 
 
-def test_summarize_problem_does_not_rewrite_formula_notation_with_regex():
+def test_summarize_problem_repairs_undelimited_formula_notation_with_model():
     cfg = _openai_cfg(summary_timeout_sec=321)
-    summary_text = "给定 a_i、a_n、1e18、10^9+7，以及 f(x)=\\sum_{i=1}^{n} floor(x / p_i)。"
+    bad = "给定 a_i、a_n、1e18、10^9+7，以及 f(x)=\\sum_{i=1}^{n} floor(x / p_i)。"
+    fixed = (
+        r"给定 \(a_i\)、\(a_n\)、\(10^{18}\)、\(10^9+7\)，"
+        r"以及 \(f(x)=\sum_{i=1}^{n}\lfloor x/p_i\rfloor\)。"
+    )
+    calls = []
 
     async def fake_call_chat(messages, **kwargs):
-        return ChatCompletionResult(text=json.dumps({"summary": summary_text}), model_tag="🐳")
+        calls.append(messages[-1]["content"])
+        text = bad if len(calls) == 1 else fixed
+        return ChatCompletionResult(text=json.dumps({"summary": text}), model_tag="🐳")
 
     with patch("kouhai_bot.handlers.shared.get_config", return_value=cfg), \
             patch("kouhai_bot.handlers.shared.call_chat_completion_result", side_effect=fake_call_chat), \
@@ -1388,8 +1430,10 @@ def test_summarize_problem_does_not_rewrite_formula_notation_with_regex():
             ):
         summary, tag = asyncio.run(summarize_problem("stmt", "input", "limits"))
 
-    assert summary == summary_text
+    assert summary == fixed
     assert tag == "🐳"
+    assert len(calls) == 2
+    assert "undelimited math" in calls[1]
 
 
 def test_doublecheck_problem_summary_uses_general_model_and_checks_symbol_scope():
@@ -1546,8 +1590,8 @@ def test_summary_doublecheck_tool_explicit_inputs_ignore_state_and_strip_thinkin
 
 def test_summarize_problem_repairs_symbol_scope_before_model_doublecheck():
     cfg = _openai_cfg(summary_timeout_sec=321)
-    bad = "对 i=1..k-1，分别取 pᵢ 和 pᵢ₊₁ 所在分量的汇点并连边。"
-    fixed = "对 i=1..k，分别取 pᵢ 和编号为 pᵢ+1 的顶点所在分量的汇点并连边。"
+    bad = r"对 \(i=1,\ldots,k-1\)，分别取 \(p_i\) 和 \(p_{i+1}\) 所在分量的汇点并连边。"
+    fixed = r"对 \(i=1,\ldots,k\)，分别取 \(p_i\) 和编号为 \(p_i+1\) 的顶点所在分量的汇点并连边。"
     responses = [
         ChatCompletionResult(text=json.dumps({"summary": bad}), model_tag="first"),
         ChatCompletionResult(text=json.dumps({"summary": fixed}), model_tag="fixed"),
@@ -1575,13 +1619,13 @@ def test_summarize_problem_repairs_symbol_scope_before_model_doublecheck():
     assert [call["temperature"] for call in calls] == [0.4, 0.2, 0.0]
     repair_payload = calls[1]["messages"][-1]["content"]
     assert "p_i+1" in repair_payload
-    assert "pᵢ₊₁" in repair_payload
+    assert "p_{i+1}" in repair_payload
 
 
 def test_summarize_problem_repairs_semantic_mismatch_and_doublechecks_again():
     cfg = _openai_cfg(summary_timeout_sec=321)
-    bad = "若 aₚᵢ=0 则加边 u→v，否则加边 v→u。"
-    fixed = "若 aₚᵢ=0 则加边 v→u，否则加边 u→v。"
+    bad = r"若 \(a_{p_i}=0\) 则加边 \(u\to v\)，否则加边 \(v\to u\)。"
+    fixed = r"若 \(a_{p_i}=0\) 则加边 \(v\to u\)，否则加边 \(u\to v\)。"
     responses = [
         ChatCompletionResult(text=json.dumps({"summary": bad}), model_tag="first"),
         ChatCompletionResult(text=json.dumps({
