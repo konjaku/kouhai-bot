@@ -209,6 +209,48 @@ def test_current_group_loaded(monkeypatch, tmp_path):
     assert cfg.current_group == 123456
 
 
+def test_problem_contest_year_range_loads_as_inclusive_dates(monkeypatch, tmp_path):
+    cfg = _from_yaml(
+        _make_yaml(problem={
+            "min_rating": 2000,
+            "max_rating": 2600,
+            "min_contest_date": 2016,
+            "max_contest_date": 2018,
+        }),
+        monkeypatch,
+        tmp_path,
+    )
+
+    assert cfg.min_contest_date == "2016-01-01"
+    assert cfg.max_contest_date == "2018-12-31"
+
+
+def test_problem_exact_contest_date_range_loads(monkeypatch, tmp_path):
+    cfg = _from_yaml(
+        _make_yaml(problem={
+            "min_contest_date": "2023-04-05",
+            "max_contest_date": "2024-06-07",
+        }),
+        monkeypatch,
+        tmp_path,
+    )
+
+    assert cfg.min_contest_date == "2023-04-05"
+    assert cfg.max_contest_date == "2024-06-07"
+
+
+def test_problem_reversed_contest_date_range_is_rejected(monkeypatch, tmp_path):
+    with pytest.raises(RuntimeError, match="min_contest_date"):
+        _from_yaml(
+            _make_yaml(problem={
+                "min_contest_date": "2025",
+                "max_contest_date": "2024",
+            }),
+            monkeypatch,
+            tmp_path,
+        )
+
+
 def test_submit_ac_backdoor_loaded(monkeypatch, tmp_path):
     cfg = _from_yaml(_make_yaml(submit_ac_backdoor="open-sesame"), monkeypatch, tmp_path)
     assert cfg.submit_ac_backdoor == "open-sesame"

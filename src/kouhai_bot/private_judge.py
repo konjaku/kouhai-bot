@@ -12,8 +12,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import cloudscraper
-
 from .config import get_config
 from .llm import append_model_tag
 from .handlers.shared import (
@@ -403,13 +401,12 @@ def _cached_problem_by_pid(pid: str) -> dict | None:
 
 
 def _fetch_problemset() -> list[dict]:
-    scraper = cloudscraper.create_scraper()
-    resp = scraper.get(_CF_API, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("status") != "OK":
-        raise RuntimeError(f"CF API error: {data}")
-    result = data.get("result", {})
+    from .problems import picker
+
+    picker._set_state_dir(get_config().data_dir)
+    result = picker._fetch_cf_api(_CF_API)
+    if not isinstance(result, dict):
+        raise RuntimeError("CF problemset.problems returned an invalid result")
     problems = result.get("problems", [])
     return problems if isinstance(problems, list) else []
 
@@ -477,13 +474,23 @@ def resolve_random_problem(
     group_id: int,
     rating_range: tuple[int, int] | None = None,
 ) -> dict:
-    from .problem_preparation import effective_rating_range
+    from .problem_preparation import (
+        effective_contest_date_range,
+        effective_rating_range,
+    )
+    from .problems import picker
+    from .problems.date_filter import contest_timestamp_in_range
 
     min_rating, max_rating = (
         rating_range
         if rating_range is not None
         else effective_rating_range(group_id)
     )
+    min_contest_date, max_contest_date = effective_contest_date_range(group_id)
+    contest_start_times: dict[int, int] = {}
+    if min_contest_date or max_contest_date:
+        picker._set_state_dir(get_config().data_dir)
+        contest_start_times = picker._get_cached_contest_start_times()
     candidates: list[dict] = []
     for item in _fetch_problemset():
         if not isinstance(item, dict):
@@ -494,6 +501,19 @@ def resolve_random_problem(
             continue
         if "*special" in tags:
             continue
+        if min_contest_date or max_contest_date:
+            contest_id = item.get("contestId")
+            start_time = (
+                contest_start_times.get(int(contest_id))
+                if contest_id is not None
+                else None
+            )
+            if start_time is None or not contest_timestamp_in_range(
+                start_time,
+                min_contest_date,
+                max_contest_date,
+            ):
+                continue
         candidates.append(item)
     if not candidates:
         raise RuntimeError("no random candidates")

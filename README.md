@@ -105,7 +105,19 @@ Bot 根据任务类型路由到两个模型队列：
 # ── Problem Selection ──
 ```
 
-配置从cf上爬取题目的题目难度上下限。自动中午发题已移除，需要换题时在群里手动发送 `/newproblem`。
+配置从 CF 上抽题的难度和比赛日期范围。自动中午发题已移除，需要换题时在群里手动发送 `/newproblem`。
+
+```yaml
+problem:
+  min_rating: 2200
+  max_rating: 2600
+  min_contest_date: "2022"       # 等价于 2022-01-01
+  max_contest_date: "2024"       # 等价于 2024-12-31
+```
+
+`min_contest_date` / `max_contest_date` 也可以写完整日期，例如
+`"2023-04-05"` 到 `"2025-06-30"`。范围按北京时间的比赛开始日期计算，端点均包含。
+该日期范围同时作用于群聊 `/newproblem` 和私聊 `/sp random`；显式指定 CF 题号不受限制。
 
 #### 宵禁
 

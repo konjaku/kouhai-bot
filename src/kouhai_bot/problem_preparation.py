@@ -34,6 +34,7 @@ from .problem_summary import (
     prepare_problem_summary,
 )
 from .problems.picker import format_reveal as format_previous_problem_reveal
+from .problems.date_filter import normalize_contest_date_range
 
 logger = logging.getLogger("kouhai-bot.problem_preparation")
 
@@ -55,6 +56,8 @@ class PreparedProblem:
     notes_message: str
     min_rating: int
     max_rating: int
+    min_contest_date: str
+    max_contest_date: str
     prepared_at: int
 
     @property
@@ -72,6 +75,8 @@ class PreparedProblem:
             "notes_message": self.notes_message,
             "min_rating": self.min_rating,
             "max_rating": self.max_rating,
+            "min_contest_date": self.min_contest_date,
+            "max_contest_date": self.max_contest_date,
             "prepared_at": self.prepared_at,
         }
 
@@ -99,6 +104,8 @@ class PreparedProblem:
                 notes_message=str(value.get("notes_message", "") or ""),
                 min_rating=int(value["min_rating"]),
                 max_rating=int(value["max_rating"]),
+                min_contest_date=str(value.get("min_contest_date", "") or ""),
+                max_contest_date=str(value.get("max_contest_date", "") or ""),
                 prepared_at=int(value["prepared_at"]),
             )
         except (KeyError, TypeError, ValueError):
@@ -141,18 +148,52 @@ def effective_rating_range(group_id: int) -> tuple[int, int]:
     return min_rating, max_rating
 
 
+def effective_contest_date_range(group_id: int) -> tuple[str, str]:
+    """Return config date bounds with the existing scheduler override semantics."""
+    cfg = get_config()
+    minimum = str(getattr(cfg, "min_contest_date", "") or "")
+    maximum = str(getattr(cfg, "max_contest_date", "") or "")
+    try:
+        from .scheduler.engine import load_group_configs
+
+        group_cfg = load_group_configs().get(group_id)
+        if group_cfg:
+            group_minimum = getattr(group_cfg, "min_contest_date", None)
+            group_maximum = getattr(group_cfg, "max_contest_date", None)
+            if isinstance(group_minimum, (str, int)):
+                minimum = str(group_minimum)
+            if isinstance(group_maximum, (str, int)):
+                maximum = str(group_maximum)
+    except Exception:
+        logger.warning(
+            "[group_%s] Failed to load scheduler date overrides; using config range",
+            group_id,
+            exc_info=True,
+        )
+    try:
+        return normalize_contest_date_range(minimum, maximum)
+    except ValueError as exc:
+        raise RuntimeError(f"invalid contest date range for group {group_id}: {exc}") from exc
+
+
 def picker_args(
     command: str,
     group_id: int,
     *extra: str,
     rating_range: tuple[int, int] | None = None,
+    date_range: tuple[str, str] | None = None,
 ) -> list[str]:
     min_rating, max_rating = (
         rating_range
         if rating_range is not None
         else effective_rating_range(group_id)
     )
-    return [
+    minimum_date, maximum_date = (
+        date_range
+        if date_range is not None
+        else effective_contest_date_range(group_id)
+    )
+    args = [
         str(PICKER_PATH),
         command,
         "--group",
@@ -163,8 +204,12 @@ def picker_args(
         str(min_rating),
         "--max-rating",
         str(max_rating),
-        *extra,
     ]
+    if minimum_date:
+        args.extend(("--min-contest-date", minimum_date))
+    if maximum_date:
+        args.extend(("--max-contest-date", maximum_date))
+    return [*args, *extra]
 
 
 def classify_pick_error(stderr_text: str) -> str:
@@ -212,6 +257,7 @@ async def _run_picker(
     group_id: int,
     *,
     rating_range: tuple[int, int] | None = None,
+    date_range: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     pick_error_msg = ""
     for attempt in range(1, PICK_ATTEMPTS + 1):
@@ -224,6 +270,7 @@ async def _run_picker(
                     group_id,
                     "--with-statement",
                     rating_range=rating_range,
+                    date_range=date_range,
                 ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -283,9 +330,11 @@ async def _run_picker(
 async def prepare_problem(group_id: int) -> PreparedProblem:
     """Run the old blocking /newproblem preparation pipeline ahead of time."""
     min_rating, max_rating = effective_rating_range(group_id)
+    min_contest_date, max_contest_date = effective_contest_date_range(group_id)
     picked_state = await _run_picker(
         group_id,
         rating_range=(min_rating, max_rating),
+        date_range=(min_contest_date, max_contest_date),
     )
     pid = str(picked_state.get("today", "") or "")
 
@@ -341,5 +390,7 @@ async def prepare_problem(group_id: int) -> PreparedProblem:
         notes_message=notes_message,
         min_rating=min_rating,
         max_rating=max_rating,
+        min_contest_date=min_contest_date,
+        max_contest_date=max_contest_date,
         prepared_at=int(time.time()),
     )

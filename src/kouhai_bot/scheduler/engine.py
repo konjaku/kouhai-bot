@@ -48,6 +48,8 @@ class GroupSchedulerConfig:
     # Problem difficulty range
     min_rating: int | None = None
     max_rating: int | None = None
+    min_contest_date: str | None = None
+    max_contest_date: str | None = None
     # Custom cron overrides per job
     job_schedules: dict[str, str] = field(default_factory=dict)
 
@@ -103,6 +105,8 @@ def load_group_configs() -> dict[int, GroupSchedulerConfig]:
             ),
             min_rating=val.get("min_rating"),
             max_rating=val.get("max_rating"),
+            min_contest_date=val.get("min_contest_date"),
+            max_contest_date=val.get("max_contest_date"),
             job_schedules=val.get("job_schedules", {}),
         )
     cfg = get_config()

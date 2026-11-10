@@ -12,17 +12,28 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 
 try:
     from . import cf_fetcher, fetcher as cf_statement
     from .content import normalize_sample_block as _normalize_sample_block
+    from .date_filter import (
+        contest_date_from_timestamp,
+        contest_timestamp_in_range,
+        normalize_contest_date_range,
+    )
 except ImportError:  # Support direct execution of this file.
     sys.path.insert(0, os.path.dirname(__file__))
     import cf_fetcher
     import fetcher as cf_statement
     from content import normalize_sample_block as _normalize_sample_block
+    from date_filter import (
+        contest_date_from_timestamp,
+        contest_timestamp_in_range,
+        normalize_contest_date_range,
+    )
 
 import cloudscraper
 
@@ -55,9 +66,6 @@ def _set_group(group_id: str):
     CURRENT_GROUP = str(group_id)
 
 
-_ensure_state_dirs()
-
-
 def _state_file() -> str:
     return os.path.join(GROUPS_DIR, CURRENT_GROUP, "state.json")
 
@@ -76,12 +84,26 @@ def _set_rating_range(min_rating: int, max_rating: int):
     RATING_MAX = int(max_rating)
 
 
+def _set_contest_date_range(minimum: object, maximum: object) -> None:
+    global CONTEST_DATE_MIN, CONTEST_DATE_MAX
+    CONTEST_DATE_MIN, CONTEST_DATE_MAX = normalize_contest_date_range(
+        minimum,
+        maximum,
+    )
+
+
 TZ = timezone(timedelta(hours=8))
 RATING_MIN = 2000
 RATING_MAX = 2600
+CONTEST_DATE_MIN = ""
+CONTEST_DATE_MAX = ""
 CACHE_TTL = 3600 * 24  # refresh cache once per day
 
 CF_API = "https://codeforces.com/api/problemset.problems"
+CF_CONTEST_API = "https://codeforces.com/api/contest.list?gym=false"
+_CF_API_MIN_INTERVAL_SEC = 2.05
+_LAST_CF_API_REQUEST_AT = 0.0
+_CF_API_LOCK = threading.Lock()
 
 # ── Used problems tracking ─────────────────────────────────────────────
 
@@ -139,7 +161,16 @@ def _problem_id(p: dict) -> str:
 # ── Selection ───────────────────────────────────────────────────────────
 
 def _cache_all_path() -> str:
-    return os.path.join(STATE_DIR, f"cf_all_{RATING_MIN}_{RATING_MAX}.json")
+    min_date = CONTEST_DATE_MIN or "any"
+    max_date = CONTEST_DATE_MAX or "any"
+    return os.path.join(
+        STATE_DIR,
+        f"cf_all_{RATING_MIN}_{RATING_MAX}_{min_date}_{max_date}.json",
+    )
+
+
+def _contest_cache_path() -> str:
+    return os.path.join(STATE_DIR, "cf_contest_start_times.json")
 
 
 _SCRAPER = None
@@ -153,21 +184,90 @@ def _get_scraper():
     return _SCRAPER
 
 
+def _fetch_cf_api(url: str) -> object:
+    """Fetch one public CF API payload while respecting its global rate limit."""
+    global _LAST_CF_API_REQUEST_AT
+    with _CF_API_LOCK:
+        wait = _CF_API_MIN_INTERVAL_SEC - (time.monotonic() - _LAST_CF_API_REQUEST_AT)
+        if wait > 0:
+            time.sleep(wait)
+        _LAST_CF_API_REQUEST_AT = time.monotonic()
+        resp = _get_scraper().get(url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    if data.get("status") != "OK":
+        raise RuntimeError(f"CF API error: {data}")
+    return data.get("result")
+
+
+def _fetch_and_cache_contest_start_times() -> dict[int, int]:
+    contests = _fetch_cf_api(CF_CONTEST_API)
+    if not isinstance(contests, list):
+        raise RuntimeError("CF contest.list returned an invalid result")
+    start_times = {
+        int(contest["id"]): int(contest["startTimeSeconds"])
+        for contest in contests
+        if isinstance(contest, dict)
+        and contest.get("id") is not None
+        and contest.get("startTimeSeconds") is not None
+    }
+    with open(_contest_cache_path(), "w") as f:
+        json.dump(start_times, f, sort_keys=True)
+    return start_times
+
+
+def _get_cached_contest_start_times() -> dict[int, int]:
+    path = _contest_cache_path()
+    if os.path.exists(path) and time.time() - os.path.getmtime(path) < CACHE_TTL:
+        try:
+            with open(path) as f:
+                value = json.load(f)
+            if isinstance(value, dict):
+                return {int(key): int(timestamp) for key, timestamp in value.items()}
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return _fetch_and_cache_contest_start_times()
+
+
 def _fetch_and_cache_targets() -> list[dict]:
     """Fetch the full problem set from CF and cache problems in the active rating range."""
-    scraper = _get_scraper()
-    resp = scraper.get(CF_API, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-    if data["status"] != "OK":
-        raise RuntimeError(f"CF API error: {data}")
+    result = _fetch_cf_api(CF_API)
+    if not isinstance(result, dict):
+        raise RuntimeError("CF problemset.problems returned an invalid result")
+    problems = result.get("problems", [])
+    if not isinstance(problems, list):
+        raise RuntimeError("CF problemset.problems returned no problem list")
+    contest_start_times = (
+        _get_cached_contest_start_times()
+        if CONTEST_DATE_MIN or CONTEST_DATE_MAX
+        else {}
+    )
 
     targets = []
-    for p in data["result"]["problems"]:
+    for p in problems:
+        if not isinstance(p, dict):
+            continue
         r = p.get("rating")
         tags = p.get("tags", [])
-        if r is not None and RATING_MIN <= r <= RATING_MAX and "*special" not in tags:
-            targets.append(p)
+        if r is None or not (RATING_MIN <= r <= RATING_MAX) or "*special" in tags:
+            continue
+        if CONTEST_DATE_MIN or CONTEST_DATE_MAX:
+            contest_id = p.get("contestId")
+            start_time = (
+                contest_start_times.get(int(contest_id))
+                if contest_id is not None
+                else None
+            )
+            if start_time is None or not contest_timestamp_in_range(
+                start_time,
+                CONTEST_DATE_MIN,
+                CONTEST_DATE_MAX,
+            ):
+                continue
+            p = dict(p)
+            p["contestStartTimeSeconds"] = start_time
+            p["contestDate"] = contest_date_from_timestamp(start_time)
+        targets.append(p)
 
     with open(_cache_all_path(), "w") as f:
         json.dump(targets, f)
@@ -192,7 +292,11 @@ def select_problem() -> dict:
     """
     problems = _get_cached_targets()
     if not problems:
-        raise RuntimeError(f"No problems found in range {RATING_MIN}-{RATING_MAX}")
+        raise RuntimeError(
+            "No problems found in rating/date range "
+            f"{RATING_MIN}-{RATING_MAX}, "
+            f"{CONTEST_DATE_MIN or 'any'}..{CONTEST_DATE_MAX or 'any'}"
+        )
 
     used = _load_used()
     solved = _load_solved_problem_ids()
@@ -564,11 +668,13 @@ def reveal() -> str:
 # ── CLI ─────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Parse --group <id>, --data-dir <path>, --min-rating <n>, --max-rating <n>, or --flag=value
+    # Parse group/data/rating/date filters, accepting --flag value and --flag=value.
     group_id = "default"
     data_dir = STATE_DIR
     min_rating = RATING_MIN
     max_rating = RATING_MAX
+    min_contest_date = CONTEST_DATE_MIN
+    max_contest_date = CONTEST_DATE_MAX
     skip_next = False
     cmd_args = []
     argv = sys.argv[1:]
@@ -592,6 +698,14 @@ if __name__ == "__main__":
             max_rating = int(argv[i + 1])
             skip_next = True
             continue
+        if a == "--min-contest-date" and i + 1 < len(argv):
+            min_contest_date = argv[i + 1]
+            skip_next = True
+            continue
+        if a == "--max-contest-date" and i + 1 < len(argv):
+            max_contest_date = argv[i + 1]
+            skip_next = True
+            continue
         if a.startswith("--group="):
             group_id = a.split("=", 1)[1]
             continue
@@ -604,6 +718,12 @@ if __name__ == "__main__":
         if a.startswith("--max-rating="):
             max_rating = int(a.split("=", 1)[1])
             continue
+        if a.startswith("--min-contest-date="):
+            min_contest_date = a.split("=", 1)[1]
+            continue
+        if a.startswith("--max-contest-date="):
+            max_contest_date = a.split("=", 1)[1]
+            continue
         if a.startswith("--"):
             continue
         cmd_args.append(a)
@@ -611,10 +731,16 @@ if __name__ == "__main__":
     _set_state_dir(data_dir)
     _set_group(group_id)
     _set_rating_range(min_rating, max_rating)
+    _set_contest_date_range(min_contest_date, max_contest_date)
     os.makedirs(os.path.join(GROUPS_DIR, group_id), exist_ok=True)
 
     if len(cmd_args) < 1:
-        print("Usage: picker.py [--group <id>] [--data-dir <path>] [--min-rating <n>] [--max-rating <n>] pick|reveal")
+        print(
+            "Usage: picker.py [--group <id>] [--data-dir <path>] "
+            "[--min-rating <n>] [--max-rating <n>] "
+            "[--min-contest-date <YYYY|YYYY-MM-DD>] "
+            "[--max-contest-date <YYYY|YYYY-MM-DD>] pick|reveal"
+        )
         sys.exit(1)
 
     cmd = cmd_args[0]

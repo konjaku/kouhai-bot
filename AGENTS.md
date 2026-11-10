@@ -840,6 +840,13 @@ newer AC can silently retarget an older review request.
 
 `/newproblem` vs `/newproblem --force` when today's problem is unsolved:
 
+Problem selection applies both the configured rating interval and the inclusive
+`min_contest_date` / `max_contest_date` interval. Date bounds accept `YYYY` or
+`YYYY-MM-DD`; a lower year expands to January 1 and an upper year to December 31.
+Use the contest's official `startTimeSeconds` from `contest.list`, interpreted in
+Asia/Shanghai, never contest IDs as a date proxy. Date-bound changes must invalidate
+both the filtered problemset cache and any durable READY prefetch slot.
+
 - Plain `/newproblem` is rejected with a reminder to use `/newproblem --force` (exact string, space required).
 - `/newproblem --force` runs the same locked force-post path as solved `/newproblem`
   (shared cooldown + per-group post lock).

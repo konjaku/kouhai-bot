@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -14,9 +15,15 @@ from kouhai_bot.problems import picker
 def _restore_picker_state():
     original_state_dir = picker.STATE_DIR
     original_group = picker.CURRENT_GROUP
+    original_rating = (picker.RATING_MIN, picker.RATING_MAX)
+    original_dates = (picker.CONTEST_DATE_MIN, picker.CONTEST_DATE_MAX)
     yield
-    picker._set_state_dir(original_state_dir)
+    picker.STATE_DIR = original_state_dir
+    picker.CACHE_DIR = os.path.join(original_state_dir, "statements")
+    picker.GROUPS_DIR = os.path.join(original_state_dir, "groups")
     picker._set_group(original_group)
+    picker._set_rating_range(*original_rating)
+    picker._set_contest_date_range(*original_dates)
 
 
 def _problem(contest_id: int, index: str) -> dict:
@@ -44,8 +51,75 @@ def test_set_state_dir_updates_all_picker_storage_paths(tmp_path):
     assert picker._scoreboard_file() == str(group_dir / "scoreboard.json")
     assert picker._cache_path("123A") == str(data_dir / "statements" / "123A.json")
     assert picker._cache_all_path() == str(
-        data_dir / f"cf_all_{picker.RATING_MIN}_{picker.RATING_MAX}.json"
+        data_dir
+        / f"cf_all_{picker.RATING_MIN}_{picker.RATING_MAX}_any_any.json"
     )
+
+
+def test_target_cache_path_is_bound_to_date_range(tmp_path):
+    data_dir, _group_dir = _configure_picker_tmp(tmp_path)
+    picker._set_contest_date_range("2016", "2018")
+
+    assert picker._cache_all_path() == str(
+        data_dir
+        / f"cf_all_{picker.RATING_MIN}_{picker.RATING_MAX}_2016-01-01_2018-12-31.json"
+    )
+
+
+def test_fetch_targets_filters_by_real_contest_start_date(monkeypatch, tmp_path):
+    _configure_picker_tmp(tmp_path)
+    picker._set_rating_range(2000, 2400)
+    picker._set_contest_date_range("2020", "2021")
+    problems = [
+        _problem(1, "A"),
+        _problem(2, "B"),
+        _problem(3, "C"),
+        _problem(999, "D"),
+    ]
+    start_times = {
+        1: int(datetime(2019, 12, 31, tzinfo=picker.TZ).timestamp()),
+        2: int(datetime(2020, 6, 1, tzinfo=picker.TZ).timestamp()),
+        3: int(datetime(2022, 1, 1, tzinfo=picker.TZ).timestamp()),
+    }
+    monkeypatch.setattr(
+        picker,
+        "_fetch_cf_api",
+        lambda _url: {"problems": problems},
+    )
+    monkeypatch.setattr(
+        picker,
+        "_get_cached_contest_start_times",
+        lambda: start_times,
+    )
+
+    targets = picker._fetch_and_cache_targets()
+
+    assert [picker._problem_id(problem) for problem in targets] == ["2B"]
+    assert targets[0]["contestDate"] == "2020-06-01"
+
+
+def test_fetch_targets_without_date_filter_does_not_load_contest_list(
+    monkeypatch,
+    tmp_path,
+):
+    _configure_picker_tmp(tmp_path)
+    picker._set_rating_range(2000, 2400)
+    picker._set_contest_date_range("", "")
+    monkeypatch.setattr(
+        picker,
+        "_fetch_cf_api",
+        lambda _url: {"problems": [_problem(1, "A")]},
+    )
+    contest_loader = pytest.fail
+    monkeypatch.setattr(
+        picker,
+        "_get_cached_contest_start_times",
+        lambda: contest_loader("contest list must not be loaded"),
+    )
+
+    targets = picker._fetch_and_cache_targets()
+
+    assert [picker._problem_id(problem) for problem in targets] == ["1A"]
 
 
 def test_select_problem_excludes_scoreboard_solves_when_used_is_missing(monkeypatch, tmp_path):

@@ -22,6 +22,8 @@ def _prepared(
     *,
     min_rating: int = 2000,
     max_rating: int = 3000,
+    min_contest_date: str = "",
+    max_contest_date: str = "",
     statement: dict | None = None,
 ):
     source = statement or {"description": "statement", "images": []}
@@ -43,6 +45,8 @@ def _prepared(
         notes_message="解释",
         min_rating=min_rating,
         max_rating=max_rating,
+        min_contest_date=min_contest_date,
+        max_contest_date=max_contest_date,
         prepared_at=1,
     )
 
@@ -62,6 +66,11 @@ def _configure(tmp_path, monkeypatch, rating=(2000, 3000)):
         problem_prefetch,
         "effective_rating_range",
         lambda _group_id: rating,
+    )
+    monkeypatch.setattr(
+        problem_prefetch,
+        "effective_contest_date_range",
+        lambda _group_id: ("", ""),
     )
     monkeypatch.setattr(problem_prefetch, "get_today_problem", lambda _group_id: None)
     monkeypatch.setattr(
@@ -244,6 +253,33 @@ def test_rating_change_invalidates_persisted_slot(tmp_path, monkeypatch):
         )
         assert await first._ensure_ready() is not None
         rating[:] = [2500, 2700]
+
+        second = NextProblemPrefetcher(GROUP_ID)
+        assert await second.peek() is None
+        assert not second.slot_path.exists()
+
+    asyncio.run(run())
+
+
+def test_contest_date_change_invalidates_persisted_slot(tmp_path, monkeypatch):
+    date_range = ["2020-01-01", "2024-12-31"]
+    _configure(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        problem_prefetch,
+        "effective_contest_date_range",
+        lambda _group_id: tuple(date_range),
+    )
+
+    async def run():
+        first = NextProblemPrefetcher(
+            GROUP_ID,
+            prepare=AsyncMock(return_value=_prepared(
+                min_contest_date="2020-01-01",
+                max_contest_date="2024-12-31",
+            )),
+        )
+        assert await first._ensure_ready() is not None
+        date_range[:] = ["2022-01-01", "2024-12-31"]
 
         second = NextProblemPrefetcher(GROUP_ID)
         assert await second.peek() is None

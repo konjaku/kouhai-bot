@@ -29,6 +29,26 @@ def _state(pid: str = "542D") -> dict:
     }
 
 
+def test_picker_args_include_canonical_contest_date_bounds(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        problem_preparation,
+        "get_config",
+        lambda: SimpleNamespace(data_dir=str(tmp_path)),
+    )
+
+    args = problem_preparation.picker_args(
+        "pick-json",
+        1,
+        "--with-statement",
+        rating_range=(2200, 2600),
+        date_range=("2022-01-01", "2024-12-31"),
+    )
+
+    assert args[args.index("--min-contest-date") + 1] == "2022-01-01"
+    assert args[args.index("--max-contest-date") + 1] == "2024-12-31"
+    assert args[-1] == "--with-statement"
+
+
 def test_prepare_problem_returns_complete_card_content(tmp_path, monkeypatch):
     cfg = SimpleNamespace(data_dir=str(tmp_path))
     statement_dir = tmp_path / "statements"
@@ -46,6 +66,11 @@ def test_prepare_problem_returns_complete_card_content(tmp_path, monkeypatch):
         problem_preparation,
         "effective_rating_range",
         lambda _group_id: (2500, 2700),
+    )
+    monkeypatch.setattr(
+        problem_preparation,
+        "effective_contest_date_range",
+        lambda _group_id: ("2020-01-01", "2024-12-31"),
     )
     monkeypatch.setattr(
         problem_preparation,
@@ -72,6 +97,10 @@ def test_prepare_problem_returns_complete_card_content(tmp_path, monkeypatch):
     assert len(prepared.statement_sha256) == 64
     assert prepared.sample_messages == ("样例 1\nInput:\n1\n\nOutput:\n2",)
     assert (prepared.min_rating, prepared.max_rating) == (2500, 2700)
+    assert (prepared.min_contest_date, prepared.max_contest_date) == (
+        "2020-01-01",
+        "2024-12-31",
+    )
 
 
 def test_prepare_problem_marks_summary_incomplete_after_existing_retry(
@@ -93,6 +122,11 @@ def test_prepare_problem_marks_summary_incomplete_after_existing_retry(
         problem_preparation,
         "effective_rating_range",
         lambda _group_id: (2000, 3000),
+    )
+    monkeypatch.setattr(
+        problem_preparation,
+        "effective_contest_date_range",
+        lambda _group_id: ("", ""),
     )
     monkeypatch.setattr(
         problem_preparation,

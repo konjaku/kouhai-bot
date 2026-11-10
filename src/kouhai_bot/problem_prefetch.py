@@ -18,13 +18,14 @@ from .handlers.shared import get_today_problem, load_scoreboard
 from .problem_content import load_statement_json, statement_fingerprint
 from .problem_preparation import (
     PreparedProblem,
+    effective_contest_date_range,
     effective_rating_range,
     prepare_problem,
 )
 
 logger = logging.getLogger("kouhai-bot.problem_prefetch")
 
-SLOT_FORMAT_VERSION = 2
+SLOT_FORMAT_VERSION = 3
 DEFAULT_RETRY_INTERVAL_SEC = 60.0
 
 
@@ -142,6 +143,12 @@ class NextProblemPrefetcher:
         current_min, current_max = effective_rating_range(self.group_id)
         if (prepared.min_rating, prepared.max_rating) != (current_min, current_max):
             return False, "rating_range_changed"
+        current_min_date, current_max_date = effective_contest_date_range(self.group_id)
+        if (prepared.min_contest_date, prepared.max_contest_date) != (
+            current_min_date,
+            current_max_date,
+        ):
+            return False, "contest_date_range_changed"
 
         pid = prepared.pid
         current = get_today_problem(self.group_id)

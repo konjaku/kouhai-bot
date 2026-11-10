@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 
 from .llm_config import LlmProviderConfig, build_provider_queues_from_yaml
+from .problems.date_filter import normalize_contest_date_range
 
 
 def _repo_root() -> Path:
@@ -137,6 +138,8 @@ class BotConfig:
     # --- Problems ---
     min_rating: int = 2000
     max_rating: int = 3000
+    min_contest_date: str = ""
+    max_contest_date: str = ""
     newproblem_cooldown: int = 300
     submit_ac_backdoor: str = ""
 
@@ -244,6 +247,13 @@ class BotConfig:
         if isinstance(problem, dict):
             c.min_rating = int(problem.get("min_rating", c.min_rating))
             c.max_rating = int(problem.get("max_rating", c.max_rating))
+            try:
+                c.min_contest_date, c.max_contest_date = normalize_contest_date_range(
+                    problem.get("min_contest_date", c.min_contest_date),
+                    problem.get("max_contest_date", c.max_contest_date),
+                )
+            except ValueError as exc:
+                raise RuntimeError(f"config.yaml: problem contest date range: {exc}") from exc
             c.newproblem_cooldown = int(
                 problem.get("newproblem_cooldown", c.newproblem_cooldown)
             )
